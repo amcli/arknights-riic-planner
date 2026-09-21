@@ -1,0 +1,13 @@
+[package]
+name = "ak-domain"
+description = "Core domain types for the Arknights RIIC planner (pure data, no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[lints]
+workspace = true

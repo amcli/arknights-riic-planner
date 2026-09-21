@@ -1,0 +1,26 @@
+# Pinned upstream game-data sources.
+#
+# Bumping a `sha` is a deliberate, versioned action: run
+#   cargo run -p ak-data-sync -- sync
+# then `cargo test --workspace`. The sync tool refuses to load data whose
+# on-disk `.sync.json` sidecar does not match the pin here.
+
+schema_version = 1
+default_source = "en_US"
+
+[[sources]]
+name = "en_US"
+repo = "Kengxxiao/ArknightsGameData_YoStar"
+sha = "57010cb5b2afea112cae57daa756b58676ba6850"
+locale = "en_US"
+note = "Upstream commit 2025-11-13 (client 31.5.80). The YoStar repository was archived on that date, so this is the final Global snapshot from this source."
+files = ["building_data.json", "character_table.json", "handbook_team_table.json"]
+
+[[sources]]
+name = "zh_CN"
+repo = "Kengxxiao/ArknightsGameData"
+sha = "bb8f9ac8db143a661577ed6ef5184d3c6e93d1d0"
+locale = "zh_CN"
+enabled = false
+note = "Still actively updated (commit 2026-09-20, client 2.7.71). Same schema as en_US; Chinese display strings. Enable to ingest operators released after the Global snapshot."
+files = ["building_data.json", "character_table.json", "handbook_team_table.json"]
