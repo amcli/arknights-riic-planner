@@ -1,0 +1,7 @@
+/target
+**/node_modules
+frontend/dist
+.env
+*.log
+*.tsbuildinfo
+/docs

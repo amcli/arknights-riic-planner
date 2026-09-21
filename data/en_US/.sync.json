@@ -1,0 +1,20 @@
+{
+  "repo": "Kengxxiao/ArknightsGameData_YoStar",
+  "sha": "57010cb5b2afea112cae57daa756b58676ba6850",
+  "locale": "en_US",
+  "fetched_at": "2026-09-21T03:07:51Z",
+  "files": {
+    "building_data.json": {
+      "sha256": "4ca8eeb5e8274c2f460f34227f325dc9093bf577d6519ab5b57025c4815d023c",
+      "bytes": 4381398
+    },
+    "character_table.json": {
+      "sha256": "cf86d1690bdae2bf02378081ef8ae61731da042902bb284d339b7c0d889e66a9",
+      "bytes": 11459107
+    },
+    "handbook_team_table.json": {
+      "sha256": "737f215c86725388e967c1a863b9679566fa419588809869475f1a99c03820ea",
+      "bytes": 9606
+    }
+  }
+}
