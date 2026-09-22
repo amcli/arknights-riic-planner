@@ -82,6 +82,9 @@ export interface OperatorSummary {
  */
 export type SimRequest = Record<string, unknown>;
 
+/** `{ room: [operator id | null, …] }`. */
+export type AssignmentMap = Record<string, (string | null)[]>;
+
 /** Tagged unions from the Rust side serialise as `{ kind, ...fields }`. */
 export type Tagged = { kind: string } & Record<string, unknown>;
 
@@ -206,6 +209,68 @@ export interface Snapshot {
   warnings: Tagged[];
 }
 
+// ---- Layer 5: solving --------------------------------------------------------
+
+/** A solve request; see `examples/requests/solve-243.json`. */
+export type SolveRequest = Record<string, unknown>;
+
+export interface Breakdown {
+  lmd: number;
+  exp: number;
+  orundum: number;
+  drones: number;
+  contacts: number;
+  training_hours: number;
+  gold_net: number;
+  exhausted_hours: number;
+}
+
+export interface Candidate {
+  assignment: AssignmentMap;
+  inner_score: number;
+  score: number;
+  breakdown: Breakdown;
+  simulated: boolean;
+}
+
+export interface SolveResult {
+  data: DataVersion;
+  strategy: "exhaustive" | "annealing";
+  inner: "steady_state" | "simulation";
+  space: { variable_slots: number; locked_slots: number; pool: number; estimated_size: number };
+  initial: Candidate;
+  candidates: Candidate[];
+  best_simulation: SimResult | null;
+  evaluations: number;
+  simulations: number;
+  elapsed_ms: number;
+}
+
+// ---- Layer 6: stored documents ---------------------------------------------
+
+export interface DocumentMeta {
+  id: string;
+  name: string | null;
+  schema_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type JobStatus = "pending" | "running" | "done" | "failed";
+
+export interface SolveSummary extends DocumentMeta {
+  status: JobStatus;
+}
+
+export interface SolveJob extends DocumentMeta {
+  status: JobStatus;
+  request: SolveRequest;
+  result?: SolveResult;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
 // ---- transport -------------------------------------------------------------
 
 export class ApiError extends Error {
@@ -229,6 +294,7 @@ async function parse<T>(res: Response): Promise<T> {
     }
     throw new ApiError(res.status, `${res.status} ${detail}`);
   }
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
@@ -236,19 +302,43 @@ async function getJson<T>(path: string): Promise<T> {
   return parse<T>(await fetch(path, { headers: { Accept: "application/json" } }));
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function sendJson<T>(method: "POST" | "PUT", path: string, body: unknown): Promise<T> {
   return parse<T>(
     await fetch(path, {
-      method: "POST",
+      method,
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
   );
 }
 
+async function deleteJson(path: string): Promise<void> {
+  await parse<void>(await fetch(path, { method: "DELETE", headers: { Accept: "application/json" } }));
+}
+
 export const api = {
   version: () => getJson<GameDataVersion>("/api/v1/gamedata/version"),
   operators: () => getJson<OperatorSummary[]>("/api/v1/gamedata/operators"),
-  evaluate: (request: SimRequest) => postJson<Snapshot>("/api/v1/evaluate", request),
-  simulate: (request: SimRequest) => postJson<SimResult>("/api/v1/simulate", request),
+  evaluate: (request: SimRequest) => sendJson<Snapshot>("POST", "/api/v1/evaluate", request),
+  simulate: (request: SimRequest) => sendJson<SimResult>("POST", "/api/v1/simulate", request),
+  solves: {
+    create: (request: SolveRequest, name?: string) =>
+      sendJson<SolveSummary>("POST", "/api/v1/solves", { name, request }),
+    list: () => getJson<SolveSummary[]>("/api/v1/solves"),
+    get: (id: string) => getJson<SolveJob>(`/api/v1/solves/${encodeURIComponent(id)}`),
+    remove: (id: string) => deleteJson(`/api/v1/solves/${encodeURIComponent(id)}`),
+  },
+  rosters: {
+    create: (roster: unknown, name?: string) =>
+      sendJson<DocumentMeta>("POST", "/api/v1/rosters", { name, roster }),
+    list: () => getJson<DocumentMeta[]>("/api/v1/rosters"),
+    get: (id: string) => getJson<DocumentMeta & { roster: unknown }>(`/api/v1/rosters/${encodeURIComponent(id)}`),
+    remove: (id: string) => deleteJson(`/api/v1/rosters/${encodeURIComponent(id)}`),
+  },
+  bases: {
+    create: (base: unknown, name?: string) => sendJson<DocumentMeta>("POST", "/api/v1/bases", { name, base }),
+    list: () => getJson<DocumentMeta[]>("/api/v1/bases"),
+    get: (id: string) => getJson<DocumentMeta & { base: unknown }>(`/api/v1/bases/${encodeURIComponent(id)}`),
+    remove: (id: string) => deleteJson(`/api/v1/bases/${encodeURIComponent(id)}`),
+  },
 };

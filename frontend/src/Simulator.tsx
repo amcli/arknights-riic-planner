@@ -12,7 +12,7 @@ import {
 // A small valid base: Control Center with Team Rainbow, one Power Plant,
 // one gold Factory, the Texas/Lappland/Exusiai Trading Post and a Dormitory.
 // Larger examples live in examples/requests/ in the repository.
-const DEFAULT_REQUEST = {
+export const DEFAULT_REQUEST = {
   base: {
     rooms: [
       { id: "cc", kind: "CONTROL", level: 5 },
@@ -238,7 +238,7 @@ function SnapshotView({ snap, name }: { snap: Snapshot; name: (id: string) => st
   );
 }
 
-function ResultView({ result, name }: { result: SimResult; name: (id: string) => string }) {
+export function ResultView({ result, name }: { result: SimResult; name: (id: string) => string }) {
   const t = result.totals;
   const output = (r: SimResult["rooms"][number]) => {
     const parts: string[] = [];

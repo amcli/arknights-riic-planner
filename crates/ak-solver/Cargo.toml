@@ -1,6 +1,6 @@
 [package]
 name = "ak-solver"
-description = "Assignment solvers (exhaustive, simulated annealing) over ak-eval — Layer 5, not yet implemented"
+description = "Assignment solver: exhaustive search for small spaces, simulated annealing over the full base — Layer 5"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,11 @@ publish.workspace = true
 [dependencies]
 ak-domain = { workspace = true }
 ak-eval = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+ak-data = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

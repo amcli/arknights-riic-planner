@@ -9,11 +9,13 @@
 //! ak mechanics                 # Layer 2 coverage: rejected / partial tiers
 //! ak simulate request.json     # Layer 4: run the mood-aware simulator
 //! ak simulate --evaluate r.json # Layer 4: instantaneous room stats only
+//! ak solve request.json        # Layer 5: search for better assignments
 //! ```
 
 use std::path::PathBuf;
 
 mod simulate;
+mod solve;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -77,6 +79,15 @@ enum Cmd {
         /// Only evaluate the starting instant: room stats and morale rates.
         #[arg(long)]
         evaluate: bool,
+    },
+    /// Layer 5: solve a request file (base, roster, objective, solver
+    /// settings) and print the best assignments found.
+    Solve {
+        /// Path to a JSON `SolveRequest` (see examples/requests/).
+        request: PathBuf,
+        /// Emit the full `SolveResult` as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -155,6 +166,7 @@ fn main() -> anyhow::Result<()> {
             json,
             evaluate,
         } => simulate::run(&loaded.data, &request, json, evaluate)?,
+        Cmd::Solve { request, json } => solve::run(&loaded.data, &request, json)?,
     }
     Ok(())
 }
