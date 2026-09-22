@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type GameDataVersion, type OperatorSummary } from "./api";
+import { Simulator } from "./Simulator";
 
 type Remote<T> = { state: "loading" } | { state: "error"; message: string } | { state: "ok"; data: T };
 
@@ -24,12 +25,14 @@ function useRemote<T>(load: () => Promise<T>): Remote<T> {
 export function App() {
   const version = useRemote(api.version);
   const operators = useRemote(api.operators);
+  const names =
+    operators.state === "ok" ? new Map(operators.data.map((o) => [o.id, o.name])) : new Map<string, string>();
 
   return (
     <main>
       <header>
         <h1>RIIC Planner</h1>
-        <p className="muted">Layers 1–2: data ingestion and skill parsing. Everything below is served live by <code>ak-api</code>.</p>
+        <p className="muted">Layers 1–4: data ingestion, skill parsing, domain model and simulator. Everything below is served live by <code>ak-api</code>.</p>
       </header>
 
       <section>
@@ -41,6 +44,11 @@ export function App() {
           </p>
         )}
         {version.state === "ok" && <VersionCard v={version.data} />}
+      </section>
+
+      <section>
+        <h2>Simulator</h2>
+        <Simulator names={names} />
       </section>
 
       <section>

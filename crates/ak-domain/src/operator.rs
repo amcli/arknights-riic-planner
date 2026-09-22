@@ -25,6 +25,12 @@ impl UnlockCond {
         level: 1,
     };
 
+    /// Elite 2, level 90: every tier of every skill is unlocked.
+    pub const MAX: UnlockCond = UnlockCond {
+        phase: ElitePhase::E2,
+        level: 90,
+    };
+
     /// Constructs a condition.
     pub const fn new(phase: ElitePhase, level: u32) -> Self {
         UnlockCond { phase, level }

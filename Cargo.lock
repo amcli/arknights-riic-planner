@@ -17,6 +17,7 @@ version = "0.1.0"
 dependencies = [
  "ak-data",
  "ak-domain",
+ "ak-eval",
  "anyhow",
  "axum",
  "clap",
@@ -34,6 +35,7 @@ version = "0.1.0"
 dependencies = [
  "ak-data",
  "ak-domain",
+ "ak-eval",
  "anyhow",
  "clap",
  "serde",
@@ -76,14 +78,17 @@ name = "ak-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "ak-eval"
 version = "0.1.0"
 dependencies = [
+ "ak-data",
  "ak-domain",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

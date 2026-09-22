@@ -109,6 +109,11 @@ pub enum CountScope {
     Rooms(RoomType),
     /// Any room except Dormitories (upstream: "non-Dormitory facility").
     WorkAreas,
+    /// The room receiving the effect. Used by effects that reach every room
+    /// of a kind but scale with who is in each of those rooms ("all Knight
+    /// Operators assigned to Factories gain productivity +7%" counts the
+    /// Knights in each Factory separately).
+    TargetRoom,
 }
 
 /// A stat other operators contribute, for "for every N X provided by all
@@ -126,9 +131,18 @@ pub enum Stat {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Counter {
-    /// Operators in a group within a scope. In `SameRoom` scope this
-    /// excludes the skill owner.
-    Operators { group: Group, scope: CountScope },
+    /// Operators in a group within a scope. The skill owner counts when they
+    /// are in the group and the scope, unless `excluding_self` is set
+    /// (upstream: "for every *other* Rhine Lab Operator"). Evidence that
+    /// the owner counts by default: four Team Rainbow Operators in the
+    /// Control Center bring its morale drain to exactly zero, which only
+    /// adds up if each of them counts themself.
+    Operators {
+        group: Group,
+        scope: CountScope,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        excluding_self: bool,
+    },
     /// Other operators in this room, any kind.
     OtherOperatorsInRoom,
     /// All operators in this room, including self.

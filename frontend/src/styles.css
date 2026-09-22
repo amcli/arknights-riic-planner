@@ -74,7 +74,7 @@ code {
 
 dl {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 4px 16px;
   margin: 0 0 16px;
 }
@@ -85,6 +85,8 @@ dt {
 
 dd {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 table {
@@ -118,4 +120,63 @@ input[type="search"] {
   background: var(--bg);
   color: var(--fg);
   font-size: 1rem;
+}
+
+h3 {
+  margin: 20px 0 8px;
+  font-size: 1rem;
+}
+
+textarea.request {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+button {
+  padding: 6px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+ul.warnings,
+ul.events {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.card table {
+  display: block;
+  overflow-x: auto;
 }

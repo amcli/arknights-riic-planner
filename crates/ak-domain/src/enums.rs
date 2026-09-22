@@ -39,6 +39,21 @@ impl RoomType {
         )
     }
 
+    /// Rooms operators can be stationed in: everything except the Private
+    /// Quarters, elevators and corridors.
+    pub const fn is_staffable(self) -> bool {
+        !matches!(
+            self,
+            RoomType::Private | RoomType::Elevator | RoomType::Corridor
+        )
+    }
+
+    /// Staffable rooms other than Dormitories: where operators *work* and
+    /// drain morale. Upstream calls these "non-Dormitory facilities".
+    pub const fn is_work_area(self) -> bool {
+        self.is_staffable() && !matches!(self, RoomType::Dormitory)
+    }
+
     /// Stable English name, independent of the loaded locale.
     pub const fn english_name(self) -> &'static str {
         match self {
@@ -67,6 +82,19 @@ str_enum! {
         Function = "FUNCTION",
         Custom = "CUSTOM",
         CustomP = "CUSTOM_P",
+    }
+}
+
+impl RoomCategory {
+    /// The layout slot category that rooms of this category are built in.
+    pub const fn slot_category(self) -> SlotCategory {
+        match self {
+            RoomCategory::Special => SlotCategory::Special,
+            RoomCategory::Output => SlotCategory::Output,
+            RoomCategory::Function => SlotCategory::Function,
+            RoomCategory::Custom => SlotCategory::Custom,
+            RoomCategory::CustomP => SlotCategory::CustomP,
+        }
     }
 }
 

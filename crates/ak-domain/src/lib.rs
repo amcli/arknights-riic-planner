@@ -15,6 +15,8 @@
 #[macro_use]
 mod macros;
 
+pub mod assignment;
+pub mod base;
 pub mod constants;
 pub mod enums;
 pub mod facility;
@@ -26,8 +28,14 @@ pub mod mechanics;
 pub mod operator;
 pub mod power;
 pub mod richtext;
+pub mod roster;
 pub mod skill;
 
+pub use assignment::{Assignment, AssignmentError, PlaceError, Slot};
+pub use base::{
+    BaseConfig, BaseError, Room, RoomId, RoomSettings, TRAINING_ASSISTANT_SLOT,
+    TRAINING_TRAINEE_SLOT, TradingStrategy, TrainingJob,
+};
 pub use constants::*;
 pub use enums::*;
 pub use facility::{Facility, FacilityPhase};
@@ -43,4 +51,5 @@ pub use mechanics::{
 pub use operator::{Operator, SkillSlot, SkillUnlock, UnlockCond};
 pub use power::{Power, PowerLevel};
 pub use richtext::{RichNode, RichTag, RichText};
+pub use roster::{Roster, RosterEntry};
 pub use skill::{BaseSkill, EfficiencyTarget};

@@ -186,6 +186,7 @@ fn transform_constants(b: &RawBuildingData) -> Result<GameConstants, TransformEr
         manpower_display_factor: b.manpower_display_factor,
         labor_recover_time: b.labor_recover_time,
         comfort_limit: b.comfort_limit,
+        comfort_manpower_recover_factor: b.comfort_manpower_recover_factor,
         basic_favor_per_day: b.basic_favor_per_day,
         tired_ap_threshold: b.tired_ap_threshold,
         manufact_input_capacity: b.manufact_input_capacity,
