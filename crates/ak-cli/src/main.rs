@@ -7,9 +7,13 @@
 //! ak find lancet               # search operators by name / id
 //! ak skipped                   # operators the lenient transform dropped
 //! ak mechanics                 # Layer 2 coverage: rejected / partial tiers
+//! ak simulate request.json     # Layer 4: run the mood-aware simulator
+//! ak simulate --evaluate r.json # Layer 4: instantaneous room stats only
 //! ```
 
 use std::path::PathBuf;
+
+mod simulate;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -61,6 +65,18 @@ enum Cmd {
         /// Also list tiers that parsed with unmodeled parts.
         #[arg(long)]
         partial: bool,
+    },
+    /// Layer 4: simulate a request file (base, assignment, roster, config,
+    /// rotation) and print totals, per-room and per-operator reports.
+    Simulate {
+        /// Path to a JSON `SimRequest` (see examples/requests/).
+        request: PathBuf,
+        /// Emit the full `SimResult` (or `Snapshot`) as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Only evaluate the starting instant: room stats and morale rates.
+        #[arg(long)]
+        evaluate: bool,
     },
 }
 
@@ -134,6 +150,11 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Skipped => print_skipped(&loaded),
         Cmd::Mechanics { partial } => print_mechanics(&loaded, partial),
+        Cmd::Simulate {
+            request,
+            json,
+            evaluate,
+        } => simulate::run(&loaded.data, &request, json, evaluate)?,
     }
     Ok(())
 }

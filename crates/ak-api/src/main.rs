@@ -9,6 +9,8 @@
 //! GET /api/v1/gamedata/operators        summary list
 //! GET /api/v1/gamedata/operators/{id}   full operator
 //! GET /api/v1/gamedata/skills/{id}      full skill tier
+//! POST /api/v1/simulate                 SimRequest → SimResult (Layer 4)
+//! POST /api/v1/evaluate                 SimRequest → Snapshot (instantaneous)
 //! ```
 //!
 //! Rosters, solves, and persistence arrive with later layers.
@@ -21,7 +23,7 @@ use anyhow::Context;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use serde::Serialize;
@@ -88,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/gamedata/operators", get(list_operators))
         .route("/api/v1/gamedata/operators/{id}", get(get_operator))
         .route("/api/v1/gamedata/skills/{id}", get(get_skill))
+        .route("/api/v1/simulate", post(simulate_route))
+        .route("/api/v1/evaluate", post(evaluate_route))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -175,6 +179,48 @@ async fn get_skill(State(s): State<AppState>, Path(id): Path<String>) -> Respons
 fn not_found(message: String) -> Response {
     (
         StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
+}
+
+/// Runs the Layer 4 simulator. CPU-bound, so it runs off the async executor.
+async fn simulate_route(
+    State(s): State<AppState>,
+    Json(req): Json<ak_eval::SimRequest>,
+) -> Response {
+    let data = s.data.clone();
+    match tokio::task::spawn_blocking(move || ak_eval::simulate(&data, &req)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(e)) => bad_request(e.to_string()),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Instantaneous room stats and morale rates for a request.
+async fn evaluate_route(
+    State(s): State<AppState>,
+    Json(req): Json<ak_eval::SimRequest>,
+) -> Response {
+    match ak_eval::evaluate(
+        &s.data,
+        &req.base,
+        &req.assignment,
+        &req.roster,
+        &req.config,
+    ) {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(e) => bad_request(e.to_string()),
+    }
+}
+
+fn bad_request(message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
         Json(serde_json::json!({ "error": message })),
     )
         .into_response()

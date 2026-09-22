@@ -1,0 +1,72 @@
+{
+  "base": {
+    "rooms": [
+      { "id": "cc", "kind": "CONTROL", "level": 5 },
+      { "id": "p1", "kind": "POWER", "level": 3 },
+      { "id": "p2", "kind": "POWER", "level": 3 },
+      { "id": "p3", "kind": "POWER", "level": 3 },
+      { "id": "t1", "kind": "TRADING", "level": 3, "settings": { "strategy": "gold" } },
+      { "id": "t2", "kind": "TRADING", "level": 3, "settings": { "strategy": "gold" } },
+      { "id": "f1", "kind": "MANUFACTURE", "level": 3, "settings": { "formula": "4" } },
+      { "id": "f2", "kind": "MANUFACTURE", "level": 3, "settings": { "formula": "4" } },
+      { "id": "f3", "kind": "MANUFACTURE", "level": 3, "settings": { "formula": "3" } },
+      { "id": "f4", "kind": "MANUFACTURE", "level": 3, "settings": { "formula": "3" } },
+      { "id": "d1", "kind": "DORMITORY", "level": 5, "settings": { "ambience": 5000 } },
+      { "id": "d2", "kind": "DORMITORY", "level": 5, "settings": { "ambience": 5000 } },
+      { "id": "d3", "kind": "DORMITORY", "level": 5, "settings": { "ambience": 5000 } },
+      { "id": "d4", "kind": "DORMITORY", "level": 5, "settings": { "ambience": 5000 } },
+      { "id": "ws", "kind": "WORKSHOP", "level": 3 },
+      { "id": "office", "kind": "HIRE", "level": 3 },
+      {
+        "id": "training",
+        "kind": "TRAINING",
+        "level": 3,
+        "settings": { "training": { "profession": "WARRIOR", "spec_level": 3 } }
+      },
+      { "id": "reception", "kind": "MEETING", "level": 3 }
+    ]
+  },
+  "assignment": {
+    "cc": ["char_456_ash", "char_457_blitz", "char_458_rfrost", "char_459_tachak", "char_002_amiya"],
+    "p1": ["char_253_greyy"],
+    "p2": ["char_277_sqrrel"],
+    "p3": ["char_285_medic2"],
+    "t1": ["char_102_texas", "char_140_whitew", "char_103_angel"],
+    "t2": ["char_196_sunbr", null, null],
+    "f1": ["char_190_clour", null, null],
+    "f2": [null, null, null],
+    "f3": ["char_286_cast3", null, null],
+    "f4": [null, null, null],
+    "d1": ["char_212_ansel", "char_120_hibisc", null, null, null],
+    "d2": [null, null, null, null, null],
+    "d3": [null, null, null, null, null],
+    "d4": [null, null, null, null, null],
+    "ws": [null],
+    "office": [null],
+    "training": ["char_106_franka", null],
+    "reception": [null, null]
+  },
+  "roster": {
+    "char_456_ash": { "promotion": { "phase": "PHASE_2", "level": 90 } },
+    "char_103_angel": { "promotion": { "phase": "PHASE_2", "level": 90 } },
+    "char_457_blitz": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_458_rfrost": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_459_tachak": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_002_amiya": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_102_texas": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_140_whitew": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_106_franka": { "promotion": { "phase": "PHASE_2", "level": 80 } },
+    "char_253_greyy": { "promotion": { "phase": "PHASE_2", "level": 70 } },
+    "char_277_sqrrel": { "promotion": { "phase": "PHASE_2", "level": 70 } },
+    "char_196_sunbr": { "promotion": { "phase": "PHASE_2", "level": 70 } },
+    "char_190_clour": { "promotion": { "phase": "PHASE_2", "level": 70 } },
+    "char_212_ansel": { "promotion": { "phase": "PHASE_1", "level": 55 } },
+    "char_120_hibisc": { "promotion": { "phase": "PHASE_1", "level": 55 } },
+    "char_285_medic2": { "promotion": { "phase": "PHASE_0", "level": 30 } },
+    "char_286_cast3": { "promotion": { "phase": "PHASE_0", "level": 30 } }
+  },
+  "config": {
+    "horizon_hours": 24,
+    "tick_minutes": 5
+  }
+}

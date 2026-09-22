@@ -1,6 +1,6 @@
 [package]
 name = "ak-cli"
-description = "Developer CLI: inspect loaded game data (and, later, run solves without the frontend)"
+description = "Developer CLI: inspect loaded game data and run simulations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 ak-data = { workspace = true }
 ak-domain = { workspace = true }
+ak-eval = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

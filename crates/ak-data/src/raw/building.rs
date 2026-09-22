@@ -14,6 +14,7 @@ pub struct RawBuildingData {
     pub manufact_input_capacity: u32,
     pub shop_counter_capacity: u32,
     pub comfort_limit: u32,
+    pub comfort_manpower_recover_factor: u32,
     pub manpower_display_factor: u32,
     pub basic_favor_per_day: u32,
     pub tired_ap_threshold: u32,

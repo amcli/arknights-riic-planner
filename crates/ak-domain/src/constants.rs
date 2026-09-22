@@ -159,6 +159,10 @@ pub struct GameConstants {
     pub labor_recover_time: u32,
     /// Upstream `comfortLimit`.
     pub comfort_limit: u32,
+    /// Upstream `comfortManpowerRecoverFactor`: ambience points per morale unit
+    /// (`manpower` units) of Dormitory recovery per second. At the pinned
+    /// value of 25, 5000 ambience adds 200 units/s = 2.0 morale per hour.
+    pub comfort_manpower_recover_factor: u32,
     /// Upstream `basicFavorPerDay` (trust per day, upstream units).
     pub basic_favor_per_day: u32,
     /// Upstream `tiredApThreshold`.

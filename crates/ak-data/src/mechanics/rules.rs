@@ -264,7 +264,7 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             }),
         r"all <T> operators assigned to factories gain productivity <V>" =>
             |c, ctx, _| one(Effect::Productivity {
-                amount: per_count(pct(c, 2)?, Counter::Operators { group: group(c, 1)?, scope: CountScope::SameRoom }, ctx),
+                amount: per_count(pct(c, 2)?, ops(group(c, 1)?, CountScope::TargetRoom), ctx),
                 product: None,
                 scope: Scope::AllRooms(RoomType::Manufacture),
             }),
@@ -539,7 +539,7 @@ static COMPOUND: LazyLock<Vec<Compound>> = LazyLock::new(|| {
     compounds![
         r"all <T> operators assigned to trading posts gain order acquisition efficiency <V> and order limit <V>" =>
             |c, ctx| {
-                let counter = Counter::Operators { group: group(c, 1)?, scope: CountScope::SameRoom };
+                let counter = ops(group(c, 1)?, CountScope::TargetRoom);
                 Ok(always(vec![
                     Effect::OrderEfficiency { amount: per_count(pct(c, 2)?, counter.clone(), ctx), scope: Scope::AllRooms(RoomType::Trading) },
                     Effect::OrderLimit { amount: per_count(num(c, 3)?, counter, ctx), scope: Scope::AllRooms(RoomType::Trading) },
@@ -547,7 +547,7 @@ static COMPOUND: LazyLock<Vec<Compound>> = LazyLock::new(|| {
             },
         r"each <T> operator assigned to factories have <V> productivity towards <K> and <V> productivity towards <K>" =>
             |c, ctx| {
-                let counter = Counter::Operators { group: group(c, 1)?, scope: CountScope::SameRoom };
+                let counter = ops(group(c, 1)?, CountScope::TargetRoom);
                 Ok(always(vec![
                     Effect::Productivity { amount: per_count(pct(c, 2)?, counter.clone(), ctx), product: product(c, 3)?, scope: Scope::AllRooms(RoomType::Manufacture) },
                     Effect::Productivity { amount: per_count(pct(c, 4)?, counter, ctx), product: product(c, 5)?, scope: Scope::AllRooms(RoomType::Manufacture) },
@@ -555,12 +555,12 @@ static COMPOUND: LazyLock<Vec<Compound>> = LazyLock::new(|| {
             },
         r"each (?:operator from )?<T>(?: operator)? (?:restores <K> and )?increases the morale of all operators in the control center by <V> per hour" =>
             |c, ctx| Ok(always(vec![Effect::Mood {
-                amount: per_count(num(c, 3)?, Counter::Operators { group: group(c, 1)?, scope: CountScope::SameRoom }, ctx),
+                amount: per_count(num(c, 3)?, ops(group(c, 1)?, CountScope::SameRoom), ctx),
                 target: MoodTarget::AllInRoom,
             }])),
         r"for each <T> operator in the base, <K> productivity <V> and morale consumed per hour <V>" =>
             |c, ctx| {
-                let counter = Counter::Operators { group: group(c, 1)?, scope: CountScope::Base };
+                let counter = ops(group(c, 1)?, CountScope::Base);
                 Ok(always(vec![
                     prod(per_count(pct(c, 3)?, counter.clone(), ctx), product(c, 2)?),
                     Effect::Mood { amount: per_count(-num(c, 4)?, counter, ctx), target: MoodTarget::SelfOnly },
@@ -614,7 +614,24 @@ macro_rules! counters {
 }
 
 fn ops(group: Group, scope: CountScope) -> Counter {
-    Counter::Operators { group, scope }
+    Counter::Operators {
+        group,
+        scope,
+        excluding_self: false,
+    }
+}
+
+/// Like [`ops`], but excludes the skill owner when the matched phrase says
+/// "other" ("for every other Rhine Lab Operator in base").
+fn ops_in(c: &Captures, group: Group, scope: CountScope) -> Counter {
+    let other = c
+        .get(0)
+        .is_some_and(|m| m.as_str().split_whitespace().any(|w| w == "other"));
+    Counter::Operators {
+        group,
+        scope,
+        excluding_self: other,
+    }
 }
 
 fn room_of(word: &str) -> Result<RoomType, String> {
@@ -638,9 +655,9 @@ static COUNTER: LazyLock<Vec<CounterRule>> = LazyLock::new(|| {
             |c| Ok((cnt(c, 1)?, counter_for_term(s(c, 2), CountScope::Base)?)),
         r"(?:<N> )?<T>(?: present)?" => |c| Ok((cnt(c, 1)?, counter_for_term(s(c, 2), CountScope::Base)?)),
         r"(?:<V> )?(?:other )?<T> operators? (?:currently )?(?:assigned to|in) (?:the same|this|that) (?:factory|trading post|power plant|dormitory|control center|building)" =>
-            |c| Ok((cnt(c, 1)?, ops(terms::group(s(c, 2))?, CountScope::SameRoom))),
+            |c| Ok((cnt(c, 1)?, ops_in(c, terms::group(s(c, 2))?, CountScope::SameRoom))),
         r"(?:<N> )?(?:other )?<T> operators? in (?:the )?base" =>
-            |c| Ok((cnt(c, 1)?, ops(terms::group(s(c, 2))?, CountScope::Base))),
+            |c| Ok((cnt(c, 1)?, ops_in(c, terms::group(s(c, 2))?, CountScope::Base))),
         r"<T> operators? currently assigned to a non-dormitory facility" =>
             |c| Ok((1.0, ops(terms::group(s(c, 1))?, CountScope::WorkAreas))),
         r"<T> operators? assigned to buildings other than dormitories and activity rooms" =>

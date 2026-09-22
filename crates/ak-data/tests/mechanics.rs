@@ -175,9 +175,11 @@ fn control_center_group_bonus_targets_all_factories() {
             amount: Amount::PerCount {
                 per: 7.0,
                 step: 1.0,
+                // Counted per receiving Factory, not in the Control Center.
                 counter: Counter::Operators {
                     group: Group::Tag("knight".into()),
-                    scope: CountScope::SameRoom,
+                    scope: CountScope::TargetRoom,
+                    excluding_self: false,
                 },
                 max_count: None,
                 max_total: None,
@@ -518,4 +520,45 @@ fn parsed_magnitudes_agree_with_efficiency_hint() {
         mismatches.len(),
         mismatches.join("\n")
     );
+}
+
+#[test]
+fn every_other_excludes_the_skill_owner() {
+    // "for every other Rhine Lab Operator in base (…, caps at 5),
+    // additional charging speed +3%".
+    let e = effects("power_rec_rhine[000]");
+    assert_eq!(e.len(), 2, "{e:?}");
+    match e[1] {
+        Effect::DroneRecovery {
+            amount:
+                Amount::PerCount {
+                    per,
+                    counter:
+                        Counter::Operators {
+                            group: Group::Power(p),
+                            scope: CountScope::Base,
+                            excluding_self: true,
+                        },
+                    max_count,
+                    ..
+                },
+        } => {
+            assert_eq!(*per, 3.0);
+            assert_eq!(p.as_str(), "rhine");
+            assert_eq!(*max_count, Some(5.0));
+        }
+        other => panic!("{other:?}"),
+    }
+    // Without "other", the owner counts.
+    let m = mechanics("control_mp_cost&faction[990]");
+    assert!(matches!(
+        m.clauses[0].effect.amount(),
+        Some(Amount::PerCount {
+            counter: Counter::Operators {
+                excluding_self: false,
+                ..
+            },
+            ..
+        })
+    ));
 }

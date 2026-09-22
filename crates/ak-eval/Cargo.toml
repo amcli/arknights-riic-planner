@@ -1,6 +1,6 @@
 [package]
 name = "ak-eval"
-description = "Evaluator and mood-aware base simulator (pure, no I/O) — Layer 4, not yet implemented"
+description = "Evaluator and mood-aware base simulator (pure, no I/O) — Layer 4"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,10 @@ publish.workspace = true
 [dependencies]
 ak-domain = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+ak-data = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
