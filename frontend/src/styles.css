@@ -180,3 +180,12 @@ ul.events {
   display: block;
   overflow-x: auto;
 }
+
+button.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: inherit;
+  text-decoration: underline;
+}

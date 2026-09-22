@@ -99,7 +99,7 @@ fn print_snapshot(data: &GameData, snap: &Snapshot) {
     print_warnings(&snap.warnings);
 }
 
-fn print_result(data: &GameData, r: &SimResult) {
+pub(crate) fn print_result(data: &GameData, r: &SimResult) {
     println!(
         "Simulated {:.0} h at {}-minute ticks on {} {}",
         r.horizon_hours,

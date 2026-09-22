@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type GameDataVersion, type OperatorSummary } from "./api";
 import { Simulator } from "./Simulator";
+import { Solver } from "./Solver";
 
 type Remote<T> = { state: "loading" } | { state: "error"; message: string } | { state: "ok"; data: T };
 
@@ -32,7 +33,7 @@ export function App() {
     <main>
       <header>
         <h1>RIIC Planner</h1>
-        <p className="muted">Layers 1–4: data ingestion, skill parsing, domain model and simulator. Everything below is served live by <code>ak-api</code>.</p>
+        <p className="muted">Layers 1–6: data ingestion, skill parsing, domain model, simulator, solver and persistence. Everything below is served live by <code>ak-api</code>.</p>
       </header>
 
       <section>
@@ -49,6 +50,11 @@ export function App() {
       <section>
         <h2>Simulator</h2>
         <Simulator names={names} />
+      </section>
+
+      <section>
+        <h2>Solver</h2>
+        <Solver names={names} />
       </section>
 
       <section>
