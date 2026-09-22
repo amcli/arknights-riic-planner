@@ -1,6 +1,6 @@
-// Typed client for the ak-api endpoints that exist today. Types mirror the
-// serde output of the Rust domain structs; keep them in sync by hand until
-// an OpenAPI/TS generator is wired in.
+// Typed client for the ak-api endpoints. Types mirror the serde output of
+// the Rust domain structs; keep them in sync by hand until an OpenAPI/TS
+// generator is wired in. Every error body is `{ "error": message }`.
 
 export type RoomType =
   | "CONTROL"
@@ -61,6 +61,35 @@ export interface GameDataVersion extends DataVersion {
   operators_skipped: number;
 }
 
+/** A room kind with its parameters at every level. */
+export interface Facility {
+  room_type: RoomType;
+  name: string;
+  description: string;
+  category: string;
+  max_count: number | null;
+  size: { rows: number; cols: number };
+  phases: {
+    level: number;
+    electricity: number;
+    max_stationed: number;
+    manpower_cost: number;
+    build_labor: number;
+  }[];
+}
+
+/** Something a Factory can make. */
+export interface Formula {
+  id: string;
+  item: string;
+  count: number;
+  weight: number;
+  cost_point: number;
+  product: string;
+  costs: { item: string; count: number }[];
+  require_rooms: { room_type: RoomType; level: number; count: number }[];
+}
+
 export interface OperatorSummary {
   id: string;
   name: string;
@@ -79,6 +108,8 @@ export interface OperatorSummary {
  * A simulation request: base, assignment, roster, config and rotation. The
  * full shape is documented by `examples/requests/*.json` in the repository;
  * the server validates it and answers 400 with a reason when it is wrong.
+ * `base_id` and `roster_id` may name stored documents in place of `base`
+ * and `roster`.
  */
 export type SimRequest = Record<string, unknown>;
 
@@ -211,7 +242,10 @@ export interface Snapshot {
 
 // ---- Layer 5: solving --------------------------------------------------------
 
-/** A solve request; see `examples/requests/solve-243.json`. */
+/**
+ * A solve request; see `examples/requests/solve-243.json`. Like a
+ * simulation request, it may use `base_id` / `roster_id`.
+ */
 export type SolveRequest = Record<string, unknown>;
 
 export interface Breakdown {
@@ -244,6 +278,21 @@ export interface SolveResult {
   evaluations: number;
   simulations: number;
   elapsed_ms: number;
+  /** Set when the search ended before covering its plan. */
+  stopped?: "time_budget" | "requested";
+}
+
+/** A running solve's latest report. */
+export interface SolveProgress {
+  phase: "searching" | "rescoring";
+  strategy: "exhaustive" | "annealing";
+  /** Units finished in this phase: assignments, annealing steps, or finalists re-scored. */
+  done: number;
+  total: number;
+  evaluations: number;
+  initial_score: number;
+  best_score: number;
+  elapsed_ms: number;
 }
 
 // ---- Layer 6: stored documents ---------------------------------------------
@@ -256,7 +305,10 @@ export interface DocumentMeta {
   updated_at: string;
 }
 
-export type JobStatus = "pending" | "running" | "done" | "failed";
+export type JobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+/** Where a roster came from. Only `manual` (the canonical shape) is importable today. */
+export type RosterSource = "manual" | "krooster" | "ak-planner";
 
 export interface SolveSummary extends DocumentMeta {
   status: JobStatus;
@@ -264,11 +316,19 @@ export interface SolveSummary extends DocumentMeta {
 
 export interface SolveJob extends DocumentMeta {
   status: JobStatus;
+  /** The request as it ran: references resolved, server limits applied. */
   request: SolveRequest;
+  /** Stored documents the request named. */
+  refs?: { base_id?: string; roster_id?: string };
+  attempts: number;
   result?: SolveResult;
   error?: string;
   started_at?: string;
   finished_at?: string;
+  /** Live, while running. */
+  progress?: SolveProgress;
+  /** Set once a stop was asked for and the search has not ended yet. */
+  stop_requested?: boolean;
 }
 
 // ---- transport -------------------------------------------------------------
@@ -319,6 +379,8 @@ async function deleteJson(path: string): Promise<void> {
 export const api = {
   version: () => getJson<GameDataVersion>("/api/v1/gamedata/version"),
   operators: () => getJson<OperatorSummary[]>("/api/v1/gamedata/operators"),
+  facilities: () => getJson<Facility[]>("/api/v1/gamedata/facilities"),
+  formulas: () => getJson<Formula[]>("/api/v1/gamedata/formulas"),
   evaluate: (request: SimRequest) => sendJson<Snapshot>("POST", "/api/v1/evaluate", request),
   simulate: (request: SimRequest) => sendJson<SimResult>("POST", "/api/v1/simulate", request),
   solves: {
@@ -326,13 +388,16 @@ export const api = {
       sendJson<SolveSummary>("POST", "/api/v1/solves", { name, request }),
     list: () => getJson<SolveSummary[]>("/api/v1/solves"),
     get: (id: string) => getJson<SolveJob>(`/api/v1/solves/${encodeURIComponent(id)}`),
+    /** Cancels a pending solve, or ends a running one's search early. */
+    stop: (id: string) => sendJson<SolveJob>("POST", `/api/v1/solves/${encodeURIComponent(id)}/stop`, {}),
     remove: (id: string) => deleteJson(`/api/v1/solves/${encodeURIComponent(id)}`),
   },
   rosters: {
-    create: (roster: unknown, name?: string) =>
-      sendJson<DocumentMeta>("POST", "/api/v1/rosters", { name, roster }),
+    create: (roster: unknown, name?: string, source: RosterSource = "manual") =>
+      sendJson<DocumentMeta>("POST", "/api/v1/rosters", { name, source, roster }),
     list: () => getJson<DocumentMeta[]>("/api/v1/rosters"),
-    get: (id: string) => getJson<DocumentMeta & { roster: unknown }>(`/api/v1/rosters/${encodeURIComponent(id)}`),
+    get: (id: string) =>
+      getJson<DocumentMeta & { roster: unknown; source: RosterSource }>(`/api/v1/rosters/${encodeURIComponent(id)}`),
     remove: (id: string) => deleteJson(`/api/v1/rosters/${encodeURIComponent(id)}`),
   },
   bases: {

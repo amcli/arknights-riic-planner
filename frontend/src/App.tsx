@@ -33,7 +33,7 @@ export function App() {
     <main>
       <header>
         <h1>RIIC Planner</h1>
-        <p className="muted">Layers 1–6: data ingestion, skill parsing, domain model, simulator, solver and persistence. Everything below is served live by <code>ak-api</code>.</p>
+        <p className="muted">Layers 1–7: data ingestion, skill parsing, domain model, simulator, solver, persistence and the API. Everything below is served live by <code>ak-api</code>.</p>
       </header>
 
       <section>

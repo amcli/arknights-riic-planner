@@ -6,6 +6,7 @@ use ak_domain::{Assignment, BaseConfig, DataVersion, OperatorId, Roster, Slot};
 use ak_eval::{Rotation, SimConfig, SimError, SimResult};
 use serde::{Deserialize, Serialize};
 
+use crate::control::StopReason;
 use crate::objective::{Breakdown, Objective};
 
 /// Which search to run.
@@ -59,7 +60,8 @@ pub struct SolverConfig {
     pub final_temperature_ratio: f64,
     /// Largest space `Strategy::Auto` enumerates exhaustively.
     pub exhaustive_limit: f64,
-    /// Stop annealing after this long; finalists so far are still re-scored.
+    /// Stop searching (exhaustive or annealing) after this long; the
+    /// finalists so far are still re-scored.
     pub time_budget_ms: Option<u64>,
     /// Re-score the finalists with the full simulator when the inner
     /// evaluator is the steady state. The best is always simulated once for
@@ -204,6 +206,11 @@ pub struct SolveResult {
     pub simulations: u64,
     /// Wall-clock time.
     pub elapsed_ms: u64,
+    /// Set when the search ended before covering its plan (the time budget
+    /// ran out, or the caller asked it to stop). The finalists are the best
+    /// found until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<StopReason>,
 }
 
 /// Why a solve could not run.

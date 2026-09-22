@@ -12,9 +12,9 @@ design; this README tracks what actually exists.
 | 2. Skill DSL | `ak-data::mechanics` | **Done to 92% / 100%.** Description parser → typed `Mechanics` AST. 589 of 640 tiers fully modelled, 51 partial with named gaps, 0 rejected. |
 | 3. Domain model | `ak-domain` | **Done.** `BaseConfig` (validated against room limits, layout slots and power), `Assignment` (checked mutators, so it cannot hold an impossible state), `Roster`. |
 | 4. Evaluator / mood sim | `ak-eval` | **Done for production and morale.** Instantaneous evaluator plus a deterministic fixed-tick simulator with rotation, collection and a shared depot. Clue output and resource accumulators are not simulated yet. |
-| 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic. |
+| 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
 | 6. Persistence | `ak-store` | **Done, file-backed.** Versioned JSON documents for rosters, bases and solve jobs, migrated on read. The Postgres backend the plan calls for waits for a database; the trait is in place. |
-| 7. API | `ak-api` | Game-data endpoints, `evaluate` and `simulate`, CRUD for rosters and bases, and solves as background jobs with polling. |
+| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. JSON errors throughout, work limits, gzip, opt-in CORS. |
 | 8. Roster import | — | Not started. |
 | 9. Frontend | `frontend/` | Vite + React + TS: game-data overview, a simulator panel, a solver panel with job polling, and the operator list. |
 
@@ -228,6 +228,15 @@ breakdown; the starting assignment is always among them, so a solve can
 never report something worse than what it was given. The same request and
 seed give the same answer.
 
+**Stopping early.** `time_budget_ms` ends either search after that long,
+and an `Observer` passed to `solve_with` receives progress every 32
+evaluations and can ask the search to end. Either way the finalists found
+so far are still re-scored and returned, and `stopped` says why
+(`time_budget` or `requested`). A run is otherwise never cut short: when
+a proposal's random draws keep missing (with the whole pool placed,
+replace and fill never apply), the annealer picks among the moves that
+exist rather than giving up.
+
 One consequence to know about: within a 24-hour horizon at full morale,
 morale is free, so without rotation the solver will happily dismantle a
 Control Center morale crew to put bodies in Factories. Enable rotation or
@@ -249,10 +258,65 @@ toolchain, both of which this machine lacks; a Postgres JSONB backend can
 replace it behind the same `Store` trait. The API opens the store at
 `<workspace>/store` (`--store-dir` or `AK_STORE_DIR`), which is git-ignored.
 
-Solves are background jobs: `POST /api/v1/solves` validates the request the
-way the solver would, stores it as `pending`, answers 202, and runs it on a
-blocking thread; the document moves through `running` to `done` with the
-result or `failed` with the reason. Poll `GET /api/v1/solves/{id}`.
+Solve documents and their life cycle are described under Layer 7.
+
+## How Layer 7 works
+
+`ak-api` is a library (`ak_api::router`, driven in-process by
+`crates/ak-api/tests/api.rs`) plus a thin binary that loads the data, opens
+the store and serves it.
+
+**References.** Any request that carries a `base` or `roster` (evaluate,
+simulate, solve) may name a stored one instead, as `base_id` / `roster_id`.
+References are resolved on arrival: a solve job stores the complete
+request it ran, plus the ids under `refs`, so it stays reproducible if the
+stored documents change.
+
+**Rosters** arrive with a `source`: `manual` (the canonical shape, the
+default), `krooster` or `ak-planner`. The stored document keeps the
+canonical roster and its source. The import adapters for the other two are
+Layer 8; until then they answer `501`.
+
+**Solves** are a queue. `POST /api/v1/solves` validates the request the way
+the solver would, stores it as `pending` and answers `202`. At most
+`--max-running-solves` run at once (half the cores by default); each runs on
+a blocking thread and moves to `running`, then `done` or `failed`:
+
+```text
+pending ──▶ running ──▶ done      (result; result.stopped if stopped early)
+   │           └──────▶ failed    (error)
+   └──▶ cancelled                 (stopped before it started)
+```
+
+While a solve runs, `GET /api/v1/solves/{id}` includes `progress`: phase
+(`searching` or `rescoring`), work done out of planned, evaluations, the
+starting and best inner scores, and elapsed time. `POST
+/api/v1/solves/{id}/stop` cancels a pending solve (`200`) or ends a running
+one's search early and keeps what it found (`202`); a finished one is a
+`409`. `DELETE` stops the solve and removes it, and nothing is written back
+afterwards.
+
+**Restarts.** On Ctrl-C the server tells running searches to stop and
+leaves their documents as they are. On the next start every `pending` or
+`running` solve is queued again and runs from the beginning; one that has
+been cut off three times is marked `failed` instead.
+
+**Limits.** `--max-ticks` (50 000 by default) bounds horizon ÷ tick for
+simulate and solve requests, and `--max-solve-ms` (ten minutes) becomes the
+time budget of any solve without a shorter one; the stored request shows
+the budget that applied.
+
+**Errors** are always JSON, `{ "error": message }`, including malformed
+bodies, unknown routes (`404`) and wrong methods (`405`, with `Allow`).
+Anything wrong in a body is `400`, and shape errors name the path
+(`base.rooms[0].kind: unknown variant …`). A missing `Content-Type` is
+`415`.
+
+**Transport.** Responses are gzip-compressed when the client accepts it (a
+24-hour simulation shrinks from 41 KB to 4 KB). CORS is off unless
+`--cors-origin` lists origins: the Vite dev server proxies `/api`, so the
+frontend never needs it, and a permissive policy would let any web page
+read and delete a local store.
 
 ## Layout
 
@@ -273,7 +337,8 @@ crates/
   ak-solver/            Layer 5: space, exhaustive, anneal, objective, evaluator
     tests/solver.rs     exhaustive vs annealing, determinism, locks, budget
   ak-store/             Layer 6: versioned JSON documents, file-backed
-  ak-api/               axum: gamedata, evaluate, simulate, rosters, bases, solves
+  ak-api/               Layer 7: axum routes, references, job queue, limits
+    tests/api.rs        the router driven in-process
   ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve`
 examples/requests/      simulation and solve requests for a 2-4-3 base
 frontend/               Vite + React + TypeScript
@@ -314,7 +379,7 @@ manifest, so a half-done bump fails loudly.
 ## Running
 
 ```bash
-cargo test --workspace                     # 126 tests, a few seconds after the first build
+cargo test --workspace                     # 145 tests, a few seconds after the first build
 cargo run -p ak-data-sync -- check         # verify pins, digests, schema, transform
 cargo run -p ak-cli -- stats               # counts + parser coverage as JSON
 cargo run -p ak-cli -- op char_285_medic2  # one operator, resolved skills
@@ -322,27 +387,35 @@ cargo run -p ak-cli -- simulate examples/requests/243-base.json             # 24
 cargo run -p ak-cli -- simulate --evaluate examples/requests/243-base.json  # starting instant
 cargo run -p ak-cli -- solve examples/requests/solve-243.json               # search, ~2 s
 cargo run -p ak-api                        # http://127.0.0.1:8080, store in ./store
+cargo run -p ak-api -- --help              # limits, CORS origins, store and data paths
 ```
 
 ```bash
 cd frontend && npm install && npm run dev  # proxies /api to the backend
 ```
 
-API endpoints today:
+API endpoints:
 
 - `GET /healthz`
 - `GET /api/v1/gamedata/version` — source, SHA, fetch time, parser version, counts, coverage
 - `GET /api/v1/gamedata/operators` — summary list
 - `GET /api/v1/gamedata/operators/{id}`
 - `GET /api/v1/gamedata/skills/{id}` — includes `mechanics` (null if rejected)
+- `GET /api/v1/gamedata/facilities` — room kinds with per-level capacity, power and build cost
+- `GET /api/v1/gamedata/formulas` — Factory formulas
 - `POST /api/v1/evaluate` — request → room stats, morale rates, contributions, warnings
 - `POST /api/v1/simulate` — request → totals, per-room and per-operator reports, morale trajectory, events, warnings
-- `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, roster }`, validated against the game data
+- `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, source?, roster }`, validated against the game data
 - `POST /api/v1/bases`, `GET /api/v1/bases`, `GET|PUT|DELETE /api/v1/bases/{id}` — body `{ name?, base }`, validated
-- `POST /api/v1/solves` — body `{ name?, request }`, answers 202 with the job; `GET /api/v1/solves` lists jobs with status; `GET|DELETE /api/v1/solves/{id}`
+- `POST /api/v1/solves` — body `{ name?, request }`, answers `202` with the job; `GET /api/v1/solves` lists jobs with status
+- `GET /api/v1/solves/{id}` — status, the request as it ran, `progress` while running, the result or error once finished
+- `POST /api/v1/solves/{id}/stop` — cancel if pending, end the search early if running
+- `DELETE /api/v1/solves/{id}` — stop if needed, then remove
 
-Invalid requests get `400` with a readable reason, for example
-`invalid base: rooms draw 60 power but Power Plants supply 0`.
+Evaluate, simulate and solve requests may use `base_id` / `roster_id` in
+place of `base` / `roster`. Invalid requests get `400` with a readable
+reason, for example `invalid base: rooms draw 60 power but Power Plants
+supply 0`.
 
 ## Toolchain notes
 

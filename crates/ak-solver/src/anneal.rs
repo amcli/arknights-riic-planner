@@ -1,10 +1,9 @@
 //! Simulated annealing with geometric cooling, and the bounded set of
 //! finalists both searches feed.
 
-use std::time::Instant;
-
 use ak_domain::Assignment;
 
+use crate::control::{CHECK_EVERY, Tracker};
 use crate::evaluator::{Evaluator, Score};
 use crate::result::{SolveError, SolverConfig};
 use crate::rng::Pcg32;
@@ -118,7 +117,9 @@ pub struct AnnealReport {
     pub steps: u32,
 }
 
-/// One annealing run from `start`, feeding `top`.
+/// One annealing run from `start`, feeding `top`. `stream` is the restart
+/// index: it picks the random stream and places this run's steps in the
+/// progress count. The run ends early when `tracker` says stop.
 pub fn anneal(
     space: &Space,
     evaluator: &mut dyn Evaluator,
@@ -126,12 +127,14 @@ pub fn anneal(
     cfg: &SolverConfig,
     top: &mut TopK,
     stream: u64,
-    deadline: Option<Instant>,
+    tracker: &mut Tracker<'_>,
 ) -> Result<AnnealReport, SolveError> {
     let mut rng = Pcg32::new(cfg.seed, stream);
+    let offset = stream as f64 * f64::from(cfg.iterations);
     let mut current = start.clone();
     let mut current_score = evaluator.score(&current)?;
     let mut evaluations = 1;
+    tracker.saw(current_score.value);
     top.insert(
         current_score.clone(),
         space.canonical(&current),
@@ -149,6 +152,7 @@ pub fn anneal(
                 };
                 let s = evaluator.score(&cand)?;
                 evaluations += 1;
+                tracker.saw(s.value);
                 let d = (s.value - current_score.value).abs();
                 if d > 0.0 {
                     deltas.push(d);
@@ -171,9 +175,8 @@ pub fn anneal(
     let mut steps = 0;
 
     for step in 0..cfg.iterations {
-        if let Some(d) = deadline
-            && step.is_multiple_of(32)
-            && Instant::now() >= d
+        if u64::from(step).is_multiple_of(CHECK_EVERY)
+            && tracker.checkpoint(offset + f64::from(step), evaluator.evaluations())
         {
             break;
         }
@@ -183,6 +186,7 @@ pub fn anneal(
         };
         let s = evaluator.score(&cand)?;
         evaluations += 1;
+        tracker.saw(s.value);
         let delta = s.value - current_score.value;
         let accept = delta >= 0.0 || rng.f64() < (delta / temperature).exp();
         top.insert(s.clone(), space.canonical(&cand), cand.clone());
@@ -193,6 +197,7 @@ pub fn anneal(
         }
         temperature *= alpha;
     }
+    tracker.report(offset + f64::from(steps), evaluator.evaluations());
 
     Ok(AnnealReport {
         evaluations,

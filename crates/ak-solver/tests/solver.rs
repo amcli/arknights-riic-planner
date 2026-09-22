@@ -359,6 +359,7 @@ fn never_worse_than_the_start_and_stops_on_budget() {
     let r = solve(data(), &req).unwrap();
     assert!(started.elapsed().as_secs() < 30, "{} ms", r.elapsed_ms);
     assert!(r.evaluations < 1_000_000);
+    assert_eq!(r.stopped, Some(StopReason::TimeBudget));
     assert_eq!(r.strategy, Strategy::Annealing);
     assert!(r.space.estimated_size > 1e6);
     assert!(
@@ -484,4 +485,185 @@ fn finalists_have_distinct_scores() {
     for pair in r.candidates.windows(2) {
         assert!(pair[0].inner_score > pair[1].inner_score + 1e-9, "{pair:?}");
     }
+}
+
+/// Records every progress report and asks to stop once it has seen
+/// `stop_after` of them.
+#[derive(Default)]
+struct Recorder {
+    seen: Vec<Progress>,
+    stop_after: Option<usize>,
+}
+
+impl Observer for Recorder {
+    fn progress(&mut self, p: &Progress) {
+        self.seen.push(p.clone());
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop_after.is_some_and(|n| self.seen.len() >= n)
+    }
+}
+
+impl Recorder {
+    fn phase(&self, phase: Phase) -> Vec<&Progress> {
+        self.seen.iter().filter(|p| p.phase == phase).collect()
+    }
+}
+
+#[test]
+fn exhaustive_reports_progress_to_completion() {
+    let (mut req, _) = crew_problem();
+    req.solver.strategy = Strategy::Exhaustive;
+    let mut rec = Recorder::default();
+    let r = solve_with(data(), &req, &mut rec).unwrap();
+    assert_eq!(r.stopped, None);
+    let search = rec.phase(Phase::Searching);
+    assert!(search.len() >= 2, "{search:?}");
+    assert!(search.windows(2).all(|w| w[0].done <= w[1].done));
+    let last = search.last().unwrap();
+    assert_eq!(last.strategy, Strategy::Exhaustive);
+    approx(last.done, 42.0, 1e-9);
+    approx(last.total, 42.0, 1e-9);
+    assert_eq!(last.evaluations, r.evaluations);
+    approx(last.initial_score, r.initial.inner_score, 1e-9);
+    approx(
+        last.best_score,
+        r.candidates[0].inner_score.max(r.initial.inner_score),
+        1e-6,
+    );
+    // Re-scoring covers every finalist and the starting assignment.
+    let rescoring = rec.phase(Phase::Rescoring);
+    let end = rescoring.last().unwrap();
+    approx(end.done, end.total, 1e-9);
+    approx(end.total, r.candidates.len() as f64 + 1.0, 1e-9);
+    // Same answer as without an observer.
+    let plain = solve(data(), &req).unwrap();
+    assert_eq!(
+        serde_json::to_string(&plain.candidates).unwrap(),
+        serde_json::to_string(&r.candidates).unwrap()
+    );
+}
+
+#[test]
+fn stopping_exhaustive_keeps_the_start() {
+    let (mut req, _) = crew_problem();
+    req.solver.strategy = Strategy::Exhaustive;
+    let mut rec = Recorder {
+        stop_after: Some(0),
+        ..Recorder::default()
+    };
+    let r = solve_with(data(), &req, &mut rec).unwrap();
+    assert_eq!(r.stopped, Some(StopReason::Requested));
+    // Only the starting assignment was scored.
+    assert_eq!(r.evaluations, 1);
+    assert_eq!(r.candidates.len(), 1);
+    assert_eq!(r.candidates[0].assignment, r.initial.assignment);
+    assert!(r.best_simulation.is_some());
+}
+
+#[test]
+fn stopping_annealing_returns_the_best_so_far() {
+    let req = example_solve(SolverConfig {
+        strategy: Strategy::Annealing,
+        iterations: 1_000_000,
+        restarts: 3,
+        top_k: 3,
+        ..SolverConfig::default()
+    });
+    let mut rec = Recorder {
+        stop_after: Some(20),
+        ..Recorder::default()
+    };
+    let r = solve_with(data(), &req, &mut rec).unwrap();
+    assert_eq!(r.stopped, Some(StopReason::Requested));
+    // Twenty checkpoints, one every 32 steps.
+    assert!(r.evaluations < 20 * 32 + 64, "{}", r.evaluations);
+    let search = rec.phase(Phase::Searching);
+    approx(search[0].total, 3_000_000.0, 1e-9);
+    assert!(search.iter().all(|p| p.done < 1_000_000.0));
+    assert!(
+        r.candidates[0].score >= r.initial.score - 1e-6,
+        "best {} < initial {}",
+        r.candidates[0].score,
+        r.initial.score
+    );
+    for c in &r.candidates {
+        c.assignment.check(&req.base, data()).unwrap();
+        assert!(c.simulated);
+    }
+    // No more restarts after the stop.
+    assert!(
+        search
+            .iter()
+            .all(|p| p.done < f64::from(req.solver.iterations))
+    );
+}
+
+#[test]
+fn a_run_of_missed_draws_does_not_end_the_search() {
+    // The frontend's example base, with every candidate placed: replace and
+    // fill never apply, so a proposal's random draws miss often, and a run
+    // of 24 misses used to end an annealing run early (at step 26 674 of 3
+    // million for this base with seed 1).
+    let b = BaseConfig::new(vec![
+        Room::new("cc", RoomType::Control, 5),
+        Room::new("p1", RoomType::Power, 3),
+        Room::new("f1", RoomType::Manufacture, 3).with_formula("4"),
+        Room::new("t1", RoomType::Trading, 3),
+        Room::new("d1", RoomType::Dormitory, 5).with_ambience(5000),
+    ]);
+    let place = [
+        ("cc", 2, "char_456_ash"),
+        ("cc", 3, "char_102_texas"),
+        ("d1", 0, "char_459_tachak"),
+        ("f1", 0, "char_457_blitz"),
+        ("f1", 1, "char_190_clour"),
+        ("f1", 2, "char_140_whitew"),
+        ("p1", 0, "char_253_greyy"),
+        ("t1", 0, "char_103_angel"),
+        ("t1", 1, "char_458_rfrost"),
+    ];
+    let mut current = Assignment::empty(&b, data());
+    for (room, index, op) in place {
+        current
+            .place(&Slot::new(room, index), OperatorId::new(op))
+            .unwrap();
+    }
+    let pool: Vec<OperatorId> = place.iter().map(|p| OperatorId::new(p.2)).collect();
+    let space = Space::new(
+        data(),
+        &b,
+        &Roster::everyone_maxed(data()),
+        Some(&pool),
+        &current,
+        &[],
+    )
+    .unwrap();
+    assert!(space.unassigned(&current).is_empty());
+    let neighbours = space.neighbours(&current);
+    assert!(!neighbours.is_empty());
+    for n in &neighbours {
+        n.check(&b, data()).unwrap();
+        assert_ne!(n, &current);
+    }
+    let mut rng = rng::Pcg32::new(1, 0);
+    for _ in 0..200_000 {
+        let next = space.propose(&current, &mut rng).expect("a move exists");
+        assert_ne!(next, current);
+    }
+
+    // With nothing to move there is no neighbour.
+    let empty_pool = Space::new(
+        data(),
+        &b,
+        &Roster::new(),
+        Some(&[]),
+        &Assignment::empty(&b, data()),
+        &[],
+    )
+    .unwrap();
+    let nobody = Assignment::empty(&b, data());
+    assert!(empty_pool.neighbours(&nobody).is_empty());
+    assert!(empty_pool.propose(&nobody, &mut rng).is_none());
 }
