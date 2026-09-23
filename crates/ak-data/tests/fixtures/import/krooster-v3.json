@@ -1,0 +1,14 @@
+{
+  "char_103_angel": { "op_id": "char_103_angel", "favorite": true, "potential": 1, "elite": 2, "level": 90, "skill_level": 7, "masteries": [3, 3, 3], "modules": { "uniequip_002_angel": 3 }, "skin": null },
+  "char_002_amiya": { "op_id": "char_002_amiya", "favorite": false, "potential": 6, "elite": 2, "level": 50, "skill_level": 7, "masteries": [3, 0, 2], "modules": {}, "skin": "char_002_amiya@epoque#4" },
+  "char_102_texas": { "op_id": "char_102_texas", "favorite": false, "potential": 5, "elite": 2, "level": 60, "skill_level": 7, "masteries": [0, 2], "modules": {}, "skin": null },
+  "char_140_whitew": { "op_id": "char_140_whitew", "favorite": false, "potential": 2, "elite": 1, "level": 70, "skill_level": 7, "masteries": [0, 0], "modules": {}, "skin": null },
+  "char_253_greyy": { "op_id": "char_253_greyy", "favorite": false, "potential": 6, "elite": 1, "level": 60, "skill_level": 7, "masteries": [0, 0], "modules": {}, "skin": null },
+  "char_190_clour": { "op_id": "char_190_clour", "favorite": false, "potential": 6, "elite": 0, "level": 45, "skill_level": 4, "masteries": [0], "modules": {}, "skin": null },
+  "char_281_popka": { "op_id": "char_281_popka", "favorite": false, "potential": 6, "elite": 1, "level": 55, "skill_level": 7, "masteries": [], "modules": {}, "skin": null },
+  "char_285_medic2": { "op_id": "char_285_medic2", "favorite": false, "potential": 6, "elite": 0, "level": 30, "skill_level": 1, "masteries": [], "modules": {}, "skin": null },
+  "char_1001_amiya2": { "op_id": "char_1001_amiya2", "favorite": false, "potential": 6, "elite": 2, "level": 1, "skill_level": 7, "masteries": [0, 0], "modules": {}, "skin": null },
+  "char_124_kroos": { "op_id": "char_124_kroos", "favorite": false, "potential": 6, "elite": 2, "level": 40, "skill_level": 7, "masteries": [], "modules": {}, "skin": null },
+  "char_456_ash": { "op_id": "char_456_ash", "favorite": true, "potential": 1, "elite": 2, "level": 95, "skill_level": 7, "masteries": [3, 3], "modules": {}, "skin": null },
+  "char_263_skadi": { "op_id": "char_263_skadi", "favorite": false, "potential": 0, "elite": 0, "level": 1, "skill_level": 1, "masteries": [0, 0], "modules": {}, "skin": null }
+}

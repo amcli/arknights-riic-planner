@@ -37,15 +37,27 @@ pub async fn create(
     name: Option<String>,
     body: impl Serialize,
 ) -> Result<Response, ApiError> {
+    let meta = insert(s, collection, name, body).await?;
+    Ok((StatusCode::CREATED, Json(meta)).into_response())
+}
+
+/// Stores a new document and returns its metadata.
+pub async fn insert(
+    s: &AppState,
+    collection: Collection,
+    name: Option<String>,
+    body: impl Serialize,
+) -> Result<DocumentMeta, ApiError> {
     let body = serde_json::to_value(body).map_err(ApiError::internal)?;
     let doc = Document::new(name, body);
     let meta = doc.meta();
     let store = s.store.clone();
     blocking(move || store.put(collection, &doc)).await??;
-    Ok((StatusCode::CREATED, Json(meta)).into_response())
+    Ok(meta)
 }
 
-/// Replaces a document's body (and its name, when one is given).
+/// Replaces a document's body (and its name, when one is given) and
+/// answers with its metadata.
 pub async fn replace(
     s: &AppState,
     collection: Collection,
@@ -53,6 +65,19 @@ pub async fn replace(
     name: Option<String>,
     body: impl Serialize,
 ) -> Result<Response, ApiError> {
+    let meta = update(s, collection, id, name, body).await?;
+    Ok(Json(meta).into_response())
+}
+
+/// Replaces a document's body (and its name, when one is given) and
+/// returns its metadata, or `404`.
+pub async fn update(
+    s: &AppState,
+    collection: Collection,
+    id: String,
+    name: Option<String>,
+    body: impl Serialize,
+) -> Result<DocumentMeta, ApiError> {
     let body = serde_json::to_value(body).map_err(ApiError::internal)?;
     let store = s.store.clone();
     let key = id.clone();
@@ -69,10 +94,7 @@ pub async fn replace(
         Ok(Some(doc.meta()))
     })
     .await??;
-    match meta {
-        Some(meta) => Ok(Json(meta).into_response()),
-        None => Err(missing(collection, &id)),
-    }
+    meta.ok_or_else(|| missing(collection, &id))
 }
 
 /// Reads a document, if it exists.

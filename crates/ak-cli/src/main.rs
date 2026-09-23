@@ -10,10 +10,12 @@
 //! ak simulate request.json     # Layer 4: run the mood-aware simulator
 //! ak simulate --evaluate r.json # Layer 4: instantaneous room stats only
 //! ak solve request.json        # Layer 5: search for better assignments
+//! ak import krooster export.json  # Layer 8: read another tool's roster
 //! ```
 
 use std::path::PathBuf;
 
+mod import;
 mod simulate;
 mod solve;
 
@@ -86,6 +88,21 @@ enum Cmd {
         /// Path to a JSON `SolveRequest` (see examples/requests/).
         request: PathBuf,
         /// Emit the full `SolveResult` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Layer 8: read another tool's roster export and report what was
+    /// imported, skipped or clamped.
+    Import {
+        /// The tool that made the export: krooster or ak-planner.
+        source: ak_data::import::Source,
+        /// Path to the export (JSON).
+        export: PathBuf,
+        /// Write the canonical roster here, ready to use as a request's
+        /// `roster`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print the roster and the report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -167,6 +184,12 @@ fn main() -> anyhow::Result<()> {
             evaluate,
         } => simulate::run(&loaded.data, &request, json, evaluate)?,
         Cmd::Solve { request, json } => solve::run(&loaded.data, &request, json)?,
+        Cmd::Import {
+            source,
+            export,
+            out,
+            json,
+        } => import::run(&loaded.data, source, &export, out.as_deref(), json)?,
     }
     Ok(())
 }

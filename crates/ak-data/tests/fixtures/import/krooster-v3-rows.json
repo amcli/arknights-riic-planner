@@ -1,0 +1,6 @@
+[
+  { "user_id": "3f0e8f2a-9f5c-4d6e-8a36-6f1f3c2b9a10", "op_id": "char_103_angel", "favorite": true, "potential": 1, "elite": 2, "level": 90, "skill_level": 7, "masteries": [3, 3, 3], "modules": { "uniequip_002_angel": 3 }, "skin": null },
+  { "user_id": "3f0e8f2a-9f5c-4d6e-8a36-6f1f3c2b9a10", "op_id": "char_102_texas", "favorite": false, "potential": 5, "elite": 2, "level": 60, "skill_level": 7, "masteries": [0, 2], "modules": {}, "skin": null },
+  { "user_id": "3f0e8f2a-9f5c-4d6e-8a36-6f1f3c2b9a10", "op_id": "char_253_greyy", "favorite": false, "potential": 6, "elite": 1, "level": 60, "skill_level": 7, "masteries": [0, 0], "modules": {}, "skin": null },
+  { "user_id": "3f0e8f2a-9f5c-4d6e-8a36-6f1f3c2b9a10", "op_id": "char_102_texas", "favorite": false, "potential": 5, "elite": 2, "level": 80, "skill_level": 7, "masteries": [0, 3], "modules": {}, "skin": null }
+]

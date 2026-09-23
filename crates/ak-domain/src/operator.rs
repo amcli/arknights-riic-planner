@@ -97,11 +97,28 @@ pub struct Operator {
     /// Maximum morale on the in-game 0–24 scale (`maxManpower` divided by
     /// `manpowerDisplayFactor`). Currently 24 for every operator.
     pub max_mood: f64,
+    /// Highest level at each promotion this operator can reach, from
+    /// upstream `phases[].maxLevel`: index 0 is Elite 0. Its length is one
+    /// more than the highest promotion (a 3★ has two entries, `[40, 55]`).
+    pub max_levels: Vec<u32>,
     /// Base-skill slots in upstream order.
     pub skill_slots: Vec<SkillSlot>,
 }
 
 impl Operator {
+    /// The highest promotion this operator can reach.
+    pub fn max_phase(&self) -> ElitePhase {
+        let top = self.max_levels.len().saturating_sub(1);
+        ElitePhase::ALL.get(top).copied().unwrap_or(ElitePhase::E2)
+    }
+
+    /// The highest level at a promotion, or `None` if the operator cannot
+    /// reach that promotion.
+    pub fn max_level(&self, phase: ElitePhase) -> Option<u32> {
+        let index = ElitePhase::ALL.iter().position(|p| *p == phase)?;
+        self.max_levels.get(index).copied()
+    }
+
     /// Every affiliation this operator has (nation, group, team), in that order.
     pub fn powers(&self) -> impl Iterator<Item = &PowerId> {
         self.nation

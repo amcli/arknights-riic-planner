@@ -15,7 +15,7 @@ design; this README tracks what actually exists.
 | 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
 | 6. Persistence | `ak-store` | **Done, file-backed.** Versioned JSON documents for rosters, bases and solve jobs, migrated on read. The Postgres backend the plan calls for waits for a database; the trait is in place. |
 | 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. JSON errors throughout, work limits, gzip, opt-in CORS. |
-| 8. Roster import | — | Not started. |
+| 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (current, row and legacy shapes) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
 | 9. Frontend | `frontend/` | Vite + React + TS: game-data overview, a simulator panel, a solver panel with job polling, and the operator list. |
 
 **Ingestion coverage (pinned en_US snapshot):** 374 / 374 operators with
@@ -273,9 +273,10 @@ request it ran, plus the ids under `refs`, so it stays reproducible if the
 stored documents change.
 
 **Rosters** arrive with a `source`: `manual` (the canonical shape, the
-default), `krooster` or `ak-planner`. The stored document keeps the
-canonical roster and its source. The import adapters for the other two are
-Layer 8; until then they answer `501`.
+default), `krooster` or `ak-planner`. The last two run the Layer 8
+adapters; the stored document keeps the canonical roster, its source and
+the import report, and `POST /api/v1/rosters/preview` shows what an import
+would store without storing it.
 
 **Solves** are a queue. `POST /api/v1/solves` validates the request the way
 the solver would, stores it as `pending` and answers `202`. At most
@@ -318,6 +319,63 @@ Anything wrong in a body is `400`, and shape errors name the path
 frontend never needs it, and a permissive policy would let any web page
 read and delete a local store.
 
+## How Layer 8 works
+
+`ak_data::import` turns another tool's roster export into the canonical
+`Roster`. Each adapter reads one format only, so a change to one tool's
+export breaks one adapter. Both tools key operators by the game's own
+`char_…` ids, the same ids the pinned data uses, so nothing is matched by
+name.
+
+| Source | How to get the file | What is read |
+| --- | --- | --- |
+| `krooster` | Krooster has no export button. On krooster.com, open the browser console and run `copy(localStorage.getItem("v3_roster"))`, then paste into a file. | Current shape: `{ id: { op_id, elite, level, potential, … } }`; also accepted as a list of rows (its database table) and in its older `{ id: { id, promotion, owned, level, … } }` shape. |
+| `ak-planner` | [GoodEffort/Arknights-Planner](https://goodeffort.github.io/Arknights-Planner/): "Import/Export" at the top right, copy the text. | `{ s, i, p }`: each saved plan's `operatorId`, `plans.currentElite` and `plans.currentLevel`, in its current and older shapes. |
+
+The formats come from each tool's source code (`neeia/ak-roster`:
+`src/types/operators/operator.ts`, `src/util/hooks/useOperators.ts`;
+`GoodEffort/Arknights-Planner`: `src/store/store-operator-functions.ts`,
+`src/types/plans.ts`), and the fixtures in
+`crates/ak-data/tests/fixtures/import/` follow them rather than real
+accounts. The plan called the second tool "ak-planner (aceship's tool)";
+no Aceship tool exports a roster, and GoodEffort's planner is the one whose
+code calls itself `akplanner`.
+
+Every operator is checked against the pinned data, and the report says
+what changed:
+
+- an id the data lacks (released after the snapshot, CN-only, Amiya's
+  alternate forms, no base skills) is skipped with `unknown_operator`;
+- a promotion the rarity cannot reach (a 3★ at Elite 2) is taken as fully
+  raised at the highest promotion it can reach (`promotion_clamped`); a
+  level outside `1..=max` for the promotion is clamped (`level_clamped`),
+  using `phases[].maxLevel` from the character table;
+- a repeated operator keeps its last entry (`duplicate`);
+- an ak-planner operator selected without a saved plan is taken as Elite 0
+  level 1, as ak-planner shows it (`no_saved_plan`).
+
+A file in the wrong format, or an entry with a field of the wrong type, is
+refused with the entry named
+(``char_102_texas: `elite` must be 0, 1 or 2, found 3``). Handing one
+tool's file to the other adapter says which tool it looks like.
+
+**Gaps, and the defaults chosen:**
+
+- Neither tool records current morale, so every imported entry has
+  `mood: null` and the simulation's `initial_mood` policy decides it.
+- ak-planner is a planner, not a roster: it lists only the operators you
+  are planning upgrades for, with no notion of ownership. Every one of them
+  is imported as owned at its *current* promotion, inactive plans included.
+- Krooster marks ownership by keeping an entry at potential 1 or more; its
+  older shape is also skipped when `owned` is `false`.
+- Skill levels, masteries, modules, potential and skins are read past: base
+  skills depend only on promotion and level.
+
+```bash
+cargo run -p ak-cli -- import krooster roster.json                  # summary and warnings
+cargo run -p ak-cli -- import ak-planner plan.json --out roster.json  # write the canonical roster
+```
+
 ## Layout
 
 ```
@@ -330,6 +388,8 @@ crates/
                         BaseConfig, Assignment, Roster
   ak-data/              raw serde mirrors → schema check → strict transform
     src/mechanics/      Layer 2: template, prefix, clause, rules, terms
+    src/import/         Layer 8: Krooster and ak-planner roster adapters
+    tests/fixtures/import/  export fixtures for the adapters
   ak-data-sync/         fetch pinned SHA, verify digests, validate
   ak-eval/              Layer 4: evaluator + mood simulator (pure, no I/O)
     src/rules.rs        every rule not in the data, with its source
@@ -339,7 +399,7 @@ crates/
   ak-store/             Layer 6: versioned JSON documents, file-backed
   ak-api/               Layer 7: axum routes, references, job queue, limits
     tests/api.rs        the router driven in-process
-  ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve`
+  ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve | import`
 examples/requests/      simulation and solve requests for a 2-4-3 base
 frontend/               Vite + React + TypeScript
 ```
@@ -379,13 +439,14 @@ manifest, so a half-done bump fails loudly.
 ## Running
 
 ```bash
-cargo test --workspace                     # 145 tests, a few seconds after the first build
+cargo test --workspace                     # 157 tests, a few seconds after the first build
 cargo run -p ak-data-sync -- check         # verify pins, digests, schema, transform
 cargo run -p ak-cli -- stats               # counts + parser coverage as JSON
 cargo run -p ak-cli -- op char_285_medic2  # one operator, resolved skills
 cargo run -p ak-cli -- simulate examples/requests/243-base.json             # 24 h report
 cargo run -p ak-cli -- simulate --evaluate examples/requests/243-base.json  # starting instant
 cargo run -p ak-cli -- solve examples/requests/solve-243.json               # search, ~2 s
+cargo run -p ak-cli -- import krooster roster.json                          # read another tool's roster
 cargo run -p ak-api                        # http://127.0.0.1:8080, store in ./store
 cargo run -p ak-api -- --help              # limits, CORS origins, store and data paths
 ```
@@ -405,7 +466,8 @@ API endpoints:
 - `GET /api/v1/gamedata/formulas` — Factory formulas
 - `POST /api/v1/evaluate` — request → room stats, morale rates, contributions, warnings
 - `POST /api/v1/simulate` — request → totals, per-room and per-operator reports, morale trajectory, events, warnings
-- `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, source?, roster }`, validated against the game data
+- `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, source?, roster }`, where `source` is `manual` (default), `krooster` or `ak-planner`; answers with the import report
+- `POST /api/v1/rosters/preview` — same body; the roster and import report, not stored
 - `POST /api/v1/bases`, `GET /api/v1/bases`, `GET|PUT|DELETE /api/v1/bases/{id}` — body `{ name?, base }`, validated
 - `POST /api/v1/solves` — body `{ name?, request }`, answers `202` with the job; `GET /api/v1/solves` lists jobs with status
 - `GET /api/v1/solves/{id}` — status, the request as it ran, `progress` while running, the result or error once finished

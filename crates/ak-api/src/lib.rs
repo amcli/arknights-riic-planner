@@ -10,7 +10,8 @@
 //! GET    /api/v1/gamedata/formulas         Factory formulas
 //! POST   /api/v1/evaluate                  request → Snapshot
 //! POST   /api/v1/simulate                  request → SimResult
-//! POST   /api/v1/rosters                   { name?, source?, roster } → 201 + metadata
+//! POST   /api/v1/rosters                   { name?, source?, roster } → 201 + metadata, import report
+//! POST   /api/v1/rosters/preview           same body → the roster and report, not stored
 //! GET    /api/v1/rosters                   listing
 //! GET    /api/v1/rosters/{id}              the roster and its source
 //! PUT    /api/v1/rosters/{id}              replace
@@ -157,6 +158,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/evaluate", post(simulation::evaluate))
         .route("/api/v1/simulate", post(simulation::simulate))
         .route("/api/v1/rosters", get(rosters::list).post(rosters::create))
+        .route("/api/v1/rosters/preview", post(rosters::preview))
         .route(
             "/api/v1/rosters/{id}",
             get(rosters::get).put(rosters::put).delete(rosters::delete),

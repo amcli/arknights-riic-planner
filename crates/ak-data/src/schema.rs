@@ -200,6 +200,7 @@ pub const CHARACTER_REQUIRED_KEYS: &[&str] = &[
     "rarity",
     "profession",
     "subProfessionId",
+    "phases",
 ];
 
 /// Professions that appear in `character_table` but never in

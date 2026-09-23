@@ -34,4 +34,14 @@ pub struct RawCharacter {
     pub rarity: RawRarity,
     pub profession: String,
     pub sub_profession_id: String,
+    /// One entry per promotion the character can reach.
+    #[serde(default)]
+    pub phases: Vec<RawPhase>,
+}
+
+/// One promotion of a character (the subset we consume).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawPhase {
+    pub max_level: u32,
 }
