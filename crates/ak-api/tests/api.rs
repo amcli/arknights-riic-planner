@@ -41,6 +41,15 @@ fn example(name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// A roster export fixture from `ak-data`.
+fn export(name: &str) -> Value {
+    let path = format!(
+        "{}/../ak-data/tests/fixtures/import/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
 fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("ak-api-test-{}", uuid::Uuid::new_v4()))
 }
@@ -402,11 +411,11 @@ async fn rosters_round_trip() {
     let (status, err) = h
         .post(
             "/api/v1/rosters",
-            json!({ "source": "krooster", "roster": {} }),
+            json!({ "source": "krooster", "roster": [1] }),
         )
         .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert!(error_of(&err).contains("krooster"), "{err}");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_of(&err), "row 0: expected an object");
     let (status, _) = h
         .post(
             "/api/v1/rosters",
@@ -747,4 +756,95 @@ async fn shutdown_leaves_running_solves_for_the_next_start() {
         .wait_for(&id, "running again", |job| job["attempts"] == 2)
         .await;
     assert_eq!(job["status"], "running");
+}
+
+// ---- roster import ---------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rosters_import_from_other_tools() {
+    let h = Harness::new(Limits::default());
+    let krooster = export("krooster-v3.json");
+
+    // A preview reads the export without storing it.
+    let (status, preview) = h
+        .post(
+            "/api/v1/rosters/preview",
+            json!({ "source": "krooster", "roster": krooster }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["source"], "krooster");
+    assert_eq!(preview["roster"].as_object().unwrap().len(), 10);
+    assert_eq!(
+        preview["roster"]["char_124_kroos"]["promotion"],
+        json!({ "phase": "PHASE_1", "level": 55 })
+    );
+    let report = &preview["import"];
+    assert_eq!(report["format"], "krooster_v3");
+    assert_eq!(report["imported"], 10);
+    assert_eq!(report["not_owned"], 1);
+    assert_eq!(report["warnings"][0]["kind"], "unknown_operator");
+    let (_, list) = h.get("/api/v1/rosters").await;
+    assert_eq!(list, json!([]));
+
+    // Storing it answers with the same report and keeps it.
+    let (status, saved) = h
+        .post(
+            "/api/v1/rosters",
+            json!({ "name": "from krooster", "source": "krooster", "roster": krooster }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(saved["import"], *report);
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let (_, doc) = h.get(&format!("/api/v1/rosters/{id}")).await;
+    assert_eq!(doc["source"], "krooster");
+    assert_eq!(doc["roster"], preview["roster"]);
+    assert_eq!(doc["import"], *report);
+
+    let (status, planner) = h
+        .post(
+            "/api/v1/rosters",
+            json!({ "source": "ak-planner", "roster": export("ak-planner.json") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{planner}");
+    assert_eq!(planner["import"]["format"], "ak_planner_export");
+    assert_eq!(planner["import"]["imported"], 4);
+
+    // The wrong tool is named in the error.
+    let (status, err) = h
+        .post(
+            "/api/v1/rosters/preview",
+            json!({ "source": "ak-planner", "roster": krooster }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error_of(&err).contains("Krooster roster"), "{err}");
+
+    // A canonical roster from a stored document is a manual one again.
+    let (status, _) = h
+        .put(
+            &format!("/api/v1/rosters/{id}"),
+            json!({ "roster": doc["roster"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, doc) = h.get(&format!("/api/v1/rosters/{id}")).await;
+    assert_eq!(doc["source"], "manual");
+    assert!(doc.get("import").is_none());
+
+    // The imported roster drives a solve by reference.
+    let base = example("243-base.json")["base"].clone();
+    let request = json!({
+        "base": base,
+        "roster_id": id,
+        "solver": { "strategy": "annealing", "iterations": 60, "restarts": 1, "top_k": 2 },
+    });
+    let solve = h.create("solves", json!({ "request": request })).await;
+    let job = h.wait_for(&solve, "done", is("done")).await;
+    assert_eq!(job["refs"]["roster_id"], id.as_str());
+    assert_eq!(job["result"]["space"]["pool"], 10);
+    let best = &job["result"]["candidates"][0];
+    assert!(best["score"].as_f64().unwrap() > 0.0, "{}", best["score"]);
 }

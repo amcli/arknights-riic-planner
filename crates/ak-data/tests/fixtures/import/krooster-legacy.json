@@ -1,0 +1,7 @@
+{
+  "char_103_angel": { "id": "char_103_angel", "name": "Exusiai", "favorite": true, "rarity": 6, "class": "Sniper", "potential": 1, "promotion": 2, "owned": true, "level": 90, "skillLevel": 7, "mastery": [3, 3, 3], "module": [3] },
+  "char_002_amiya": { "id": "char_002_amiya", "name": "Amiya", "favorite": false, "rarity": 5, "class": "Caster", "potential": 6, "promotion": 2, "owned": true, "level": 50, "skillLevel": 7, "mastery": [3, 0, 2], "module": [] },
+  "char_285_medic2": { "id": "char_285_medic2", "name": "Lancet-2", "favorite": false, "rarity": 1, "class": "Medic", "potential": 6, "promotion": 0, "owned": true, "level": 30, "skillLevel": 1, "mastery": [], "module": [] },
+  "char_017_huang": { "id": "char_017_huang", "name": "Blaze", "favorite": false, "rarity": 6, "class": "Guard", "potential": 0, "promotion": 0, "owned": false, "level": 0, "skillLevel": 1, "mastery": [0, 0], "module": [] },
+  "char_010_chen": { "id": "char_010_chen", "name": "Ch'en", "favorite": false, "rarity": 6, "class": "Guard", "potential": 1, "promotion": 0, "owned": false, "level": 1, "skillLevel": 1, "mastery": [0, 0], "module": [] }
+}

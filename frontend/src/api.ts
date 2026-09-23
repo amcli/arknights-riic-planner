@@ -307,8 +307,36 @@ export interface DocumentMeta {
 
 export type JobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
 
-/** Where a roster came from. Only `manual` (the canonical shape) is importable today. */
+/** Where a roster came from: the canonical shape, or another tool's export. */
 export type RosterSource = "manual" | "krooster" | "ak-planner";
+
+/** `{ operator id: { promotion: { phase, level }, mood } }`. */
+export type Roster = Record<string, { promotion: { phase: "PHASE_0" | "PHASE_1" | "PHASE_2"; level: number }; mood: number | null }>;
+
+/** Something an import skipped or changed; `kind` says what. */
+export type ImportWarning =
+  | { kind: "unknown_operator"; operator: string }
+  | { kind: "promotion_clamped"; operator: string; found: number; used: string; level: number }
+  | { kind: "level_clamped"; operator: string; found: number; used: number }
+  | { kind: "duplicate"; operator: string }
+  | { kind: "no_saved_plan"; operator: string };
+
+/** What reading another tool's export did. */
+export interface ImportReport {
+  source: "krooster" | "ak-planner";
+  format: "krooster_v3" | "krooster_v3_rows" | "krooster_legacy" | "ak_planner_export";
+  entries: number;
+  imported: number;
+  not_owned: number;
+  warnings: ImportWarning[];
+}
+
+/** A roster as stored (or as a preview would store it). */
+export interface RosterView {
+  roster: Roster;
+  source: RosterSource;
+  import?: ImportReport;
+}
 
 export interface SolveSummary extends DocumentMeta {
   status: JobStatus;
@@ -394,10 +422,16 @@ export const api = {
   },
   rosters: {
     create: (roster: unknown, name?: string, source: RosterSource = "manual") =>
-      sendJson<DocumentMeta>("POST", "/api/v1/rosters", { name, source, roster }),
+      sendJson<DocumentMeta & { source: RosterSource; import?: ImportReport }>("POST", "/api/v1/rosters", {
+        name,
+        source,
+        roster,
+      }),
+    /** What an import would store, without storing it. */
+    preview: (roster: unknown, source: RosterSource) =>
+      sendJson<RosterView>("POST", "/api/v1/rosters/preview", { source, roster }),
     list: () => getJson<DocumentMeta[]>("/api/v1/rosters"),
-    get: (id: string) =>
-      getJson<DocumentMeta & { roster: unknown; source: RosterSource }>(`/api/v1/rosters/${encodeURIComponent(id)}`),
+    get: (id: string) => getJson<DocumentMeta & RosterView>(`/api/v1/rosters/${encodeURIComponent(id)}`),
     remove: (id: string) => deleteJson(`/api/v1/rosters/${encodeURIComponent(id)}`),
   },
   bases: {

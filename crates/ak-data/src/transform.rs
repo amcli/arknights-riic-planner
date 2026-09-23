@@ -67,6 +67,8 @@ pub enum TransformError {
     MissingRoom(RoomType),
     #[error("layout {0:?} is missing from building_data.layouts")]
     MissingLayout(String),
+    #[error("has no promotion phases in character_table")]
+    NoPhases,
     #[error("buff map key {key:?} does not match its buffId {id:?}")]
     BuffKeyMismatch { key: String, id: String },
     #[error("{context}: {source}")]
@@ -480,6 +482,10 @@ fn transform_operator(
         }
     };
     let profession = character.profession.parse::<Profession>()?;
+    if character.phases.is_empty() || character.phases.len() > ElitePhase::ALL.len() {
+        return Err(TransformError::NoPhases);
+    }
+    let max_levels = character.phases.iter().map(|p| p.max_level).collect();
 
     let power =
         |level: PowerLevel, value: &Option<String>| -> Result<Option<PowerId>, TransformError> {
@@ -536,6 +542,7 @@ fn transform_operator(
         group,
         team,
         max_mood: building_char.max_manpower as f64 / f64::from(manpower_display_factor),
+        max_levels,
         skill_slots,
     })
 }

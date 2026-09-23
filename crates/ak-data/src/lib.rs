@@ -13,7 +13,11 @@
 //! Around those: [`manifest`] pins upstream commits, [`schema`] detects
 //! drift in the raw JSON before it reaches the typed structs, [`loader`]
 //! wires it together, and [`richtext`] parses description markup.
+//!
+//! [`import`] (Layer 8) turns other tools' roster exports into the
+//! canonical [`ak_domain::Roster`].
 
+pub mod import;
 pub mod loader;
 pub mod manifest;
 pub mod mechanics;

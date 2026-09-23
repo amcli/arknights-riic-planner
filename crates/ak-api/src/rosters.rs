@@ -1,9 +1,12 @@
 //! Stored rosters.
 //!
-//! A roster arrives with a `source` saying what format it is in. `manual`
-//! is the canonical [`Roster`] shape; the other sources are other tools'
-//! exports, which the Layer 8 adapters turn into a [`Roster`]. The stored
-//! document keeps the canonical roster and the source it came from.
+//! A roster arrives with a `source` saying what format it is in: `manual`
+//! is the canonical [`Roster`] shape; `krooster` and `ak-planner` are
+//! those tools' exports, which the Layer 8 adapters in [`ak_data::import`]
+//! turn into a [`Roster`]. The stored document keeps the canonical roster,
+//! the source it came from, and for an import, the report of what was
+//! skipped or changed. `POST /api/v1/rosters/preview` runs the same import
+//! without storing anything.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -12,8 +15,9 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ak_data::import::{self, ImportReport};
 use ak_domain::{GameData, Roster};
-use ak_store::Collection;
+use ak_store::{Collection, DocumentMeta};
 
 use crate::AppState;
 use crate::error::{ApiError, Body, from_value};
@@ -26,19 +30,20 @@ pub enum RosterSource {
     /// The canonical shape: `{ operator id: { promotion, mood? } }`.
     #[default]
     Manual,
-    /// A Krooster export.
+    /// A Krooster roster (see [`ak_data::import::krooster`]).
     Krooster,
-    /// An ak-planner export.
+    /// An ak-planner export (see [`ak_data::import::ak_planner`]).
     AkPlanner,
 }
 
 impl RosterSource {
-    /// The name used in requests.
-    pub fn as_str(self) -> &'static str {
+    /// The import adapter for this source, if it is not the canonical
+    /// shape.
+    fn adapter(self) -> Option<import::Source> {
         match self {
-            RosterSource::Manual => "manual",
-            RosterSource::Krooster => "krooster",
-            RosterSource::AkPlanner => "ak-planner",
+            RosterSource::Manual => None,
+            RosterSource::Krooster => Some(import::Source::Krooster),
+            RosterSource::AkPlanner => Some(import::Source::AkPlanner),
         }
     }
 }
@@ -61,6 +66,19 @@ pub struct RosterView {
     /// What it was imported from.
     #[serde(default)]
     pub source: RosterSource,
+    /// For an import, what was skipped or changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import: Option<ImportReport>,
+}
+
+/// What `POST` and `PUT` answer: the metadata, and the import report.
+#[derive(Serialize)]
+struct Saved {
+    #[serde(flatten)]
+    meta: DocumentMeta,
+    source: RosterSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    import: Option<ImportReport>,
 }
 
 /// Rejects operators the game data does not know.
@@ -81,32 +99,58 @@ pub fn check_roster(data: &GameData, roster: &Roster) -> Result<(), ApiError> {
     }
 }
 
-/// Turns a supplied roster into the canonical one.
-fn import(data: &GameData, source: RosterSource, raw: Value) -> Result<Roster, ApiError> {
-    let roster: Roster = match source {
-        RosterSource::Manual => from_value(raw)?,
-        other => {
-            return Err(ApiError::new(
-                StatusCode::NOT_IMPLEMENTED,
-                format!("importing a {} roster is not supported yet", other.as_str()),
-            ));
+/// Turns a supplied roster into the canonical one. Imports skip operators
+/// the game data lacks (and say so in the report); a canonical roster must
+/// not name any.
+fn read(data: &GameData, source: RosterSource, raw: Value) -> Result<RosterView, ApiError> {
+    let view = match source.adapter() {
+        None => {
+            let roster: Roster = from_value(raw)?;
+            check_roster(data, &roster)?;
+            RosterView {
+                roster,
+                source,
+                import: None,
+            }
+        }
+        Some(adapter) => {
+            let imported = import::import(adapter, data, &raw).map_err(ApiError::bad_request)?;
+            RosterView {
+                roster: imported.roster,
+                source,
+                import: Some(imported.report),
+            }
         }
     };
-    check_roster(data, &roster)?;
-    Ok(roster)
+    Ok(view)
 }
 
-/// `POST /api/v1/rosters`.
+fn saved(meta: DocumentMeta, view: RosterView) -> Saved {
+    Saved {
+        meta,
+        source: view.source,
+        import: view.import,
+    }
+}
+
+/// `POST /api/v1/rosters`: imports and stores a roster, answering `201`
+/// with its metadata and, for an import, the report.
 pub async fn create(
     State(s): State<AppState>,
     Body(body): Body<RosterBody>,
 ) -> Result<Response, ApiError> {
-    let roster = import(&s.data, body.source, body.roster)?;
-    let view = RosterView {
-        roster,
-        source: body.source,
-    };
-    stored::create(&s, Collection::Rosters, body.name, view).await
+    let view = read(&s.data, body.source, body.roster)?;
+    let meta = stored::insert(&s, Collection::Rosters, body.name, &view).await?;
+    Ok((StatusCode::CREATED, Json(saved(meta, view))).into_response())
+}
+
+/// `POST /api/v1/rosters/preview`: the roster and report an import would
+/// store, without storing it.
+pub async fn preview(
+    State(s): State<AppState>,
+    Body(body): Body<RosterBody>,
+) -> Result<Response, ApiError> {
+    Ok(Json(read(&s.data, body.source, body.roster)?).into_response())
 }
 
 /// `GET /api/v1/rosters`.
@@ -121,18 +165,16 @@ pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Re
     Ok(Json(view).into_response())
 }
 
-/// `PUT /api/v1/rosters/{id}`.
+/// `PUT /api/v1/rosters/{id}`: replaces a roster, importing it again if
+/// it is an export.
 pub async fn put(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Body(body): Body<RosterBody>,
 ) -> Result<Response, ApiError> {
-    let roster = import(&s.data, body.source, body.roster)?;
-    let view = RosterView {
-        roster,
-        source: body.source,
-    };
-    stored::replace(&s, Collection::Rosters, id, body.name, view).await
+    let view = read(&s.data, body.source, body.roster)?;
+    let meta = stored::update(&s, Collection::Rosters, id, body.name, &view).await?;
+    Ok(Json(saved(meta, view)).into_response())
 }
 
 /// `DELETE /api/v1/rosters/{id}`.
