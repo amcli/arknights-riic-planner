@@ -212,8 +212,8 @@ impl Space {
     }
 
     /// A random neighbour: swap two slots, replace an occupant with a bench
-    /// operator, fill an empty slot, or clear a slot. `None` if no move
-    /// applies.
+    /// operator, fill an empty slot, or clear a slot. `None` only if no move
+    /// applies at all.
     pub fn propose(&self, current: &Assignment, rng: &mut Pcg32) -> Option<Assignment> {
         for _ in 0..24 {
             let mut a = current.clone();
@@ -231,7 +231,60 @@ impl Space {
                 return Some(a);
             }
         }
-        None
+        // The random draws kept picking moves that do not apply here (with
+        // the whole pool placed, replace and fill never do). That is rare,
+        // and it does not mean the search is stuck, so choose among the
+        // moves that exist.
+        let mut all = self.neighbours(current);
+        if all.is_empty() {
+            None
+        } else {
+            let pick = rng.below(all.len());
+            Some(all.swap_remove(pick))
+        }
+    }
+
+    /// Every assignment one move away from `current`.
+    pub fn neighbours(&self, current: &Assignment) -> Vec<Assignment> {
+        let mut out = Vec::new();
+        for i in 0..self.slots.len() {
+            for j in i + 1..self.slots.len() {
+                let same_group = self.slot_group[i] == self.slot_group[j];
+                if same_group && !self.groups[self.slot_group[i]].ordered {
+                    continue;
+                }
+                let (si, sj) = (&self.slots[i], &self.slots[j]);
+                if !is_occupied(current, si) && !is_occupied(current, sj) {
+                    continue;
+                }
+                let mut a = current.clone();
+                if a.swap(si, sj).is_ok() {
+                    out.push(a);
+                }
+            }
+        }
+        let bench = self.unassigned(current);
+        for slot in &self.slots {
+            let occupied = is_occupied(current, slot);
+            for op in &bench {
+                let mut a = current.clone();
+                let moved = if occupied {
+                    a.move_to(op, slot).is_ok()
+                } else {
+                    a.place(slot, (*op).clone()).is_ok()
+                };
+                if moved {
+                    out.push(a);
+                }
+            }
+            if occupied {
+                let mut a = current.clone();
+                if a.remove(slot).is_some() {
+                    out.push(a);
+                }
+            }
+        }
+        out
     }
 
     fn swap(&self, a: &mut Assignment, rng: &mut Pcg32) -> bool {
@@ -318,6 +371,12 @@ impl Space {
     pub(crate) fn groups(&self) -> impl Iterator<Item = (&[usize], bool)> {
         self.groups.iter().map(|g| (g.slots.as_slice(), g.ordered))
     }
+}
+
+fn is_occupied(a: &Assignment, s: &Slot) -> bool {
+    a.slots(s.room.as_str())
+        .and_then(|v| v.get(usize::from(s.index)))
+        .is_some_and(Option::is_some)
 }
 
 fn choose(n: usize, k: usize) -> f64 {

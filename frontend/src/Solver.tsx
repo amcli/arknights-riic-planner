@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Candidate, type SolveJob, type SolveRequest, type SolveSummary } from "./api";
+import { api, type Candidate, type SolveJob, type SolveProgress, type SolveRequest, type SolveSummary } from "./api";
 import { DEFAULT_REQUEST, ResultView } from "./Simulator";
 
 // The simulator's small base, handed to the solver with its assignment as
@@ -19,9 +19,11 @@ const DEFAULT_SOLVE: SolveRequest = {
 type Phase =
   | { state: "idle" }
   | { state: "submitting" }
-  | { state: "polling"; id: string; status: string }
+  | { state: "polling"; id: string; job?: SolveJob }
   | { state: "done"; job: SolveJob }
   | { state: "error"; message: string };
+
+const FINISHED = new Set(["done", "failed", "cancelled"]);
 
 const fmt = (n: number, digits = 0) =>
   n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -43,19 +45,32 @@ export function Solver({ names }: { names: Map<string, string> }) {
     };
   }, []);
 
+  const show = (job: SolveJob) => {
+    if (FINISHED.has(job.status)) {
+      setPhase({ state: "done", job });
+      refreshRecent();
+    } else {
+      setPhase({ state: "polling", id: job.id, job });
+    }
+  };
+
   const poll = (id: string) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
     api.solves.get(id).then(
       (job) => {
-        if (job.status === "done" || job.status === "failed") {
-          setPhase({ state: "done", job });
-          refreshRecent();
-        } else {
-          setPhase({ state: "polling", id, status: job.status });
-          timer.current = window.setTimeout(() => poll(id), 1000);
-        }
+        show(job);
+        if (!FINISHED.has(job.status)) timer.current = window.setTimeout(() => poll(id), 500);
       },
       (err: unknown) => setPhase({ state: "error", message: err instanceof Error ? err.message : String(err) }),
     );
+  };
+
+  const stop = async (id: string) => {
+    try {
+      show(await api.solves.stop(id));
+    } catch (err) {
+      setPhase({ state: "error", message: err instanceof Error ? err.message : String(err) });
+    }
   };
 
   const submit = async () => {
@@ -69,9 +84,9 @@ export function Solver({ names }: { names: Map<string, string> }) {
     setPhase({ state: "submitting" });
     try {
       const summary = await api.solves.create(request, `web ${new Date().toLocaleString()}`);
-      setPhase({ state: "polling", id: summary.id, status: summary.status });
+      setPhase({ state: "polling", id: summary.id });
       refreshRecent();
-      timer.current = window.setTimeout(() => poll(summary.id), 500);
+      timer.current = window.setTimeout(() => poll(summary.id), 300);
     } catch (err) {
       setPhase({ state: "error", message: err instanceof Error ? err.message : String(err) });
     }
@@ -98,16 +113,22 @@ export function Solver({ names }: { names: Map<string, string> }) {
         <button type="button" onClick={() => void submit()} disabled={busy}>
           Solve
         </button>
+        {phase.state === "polling" && (
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void stop(phase.id)}
+            disabled={phase.job?.stop_requested === true}
+          >
+            {phase.job?.status === "pending" ? "Cancel" : "Stop and keep best"}
+          </button>
+        )}
         <button type="button" className="secondary" onClick={() => setText(JSON.stringify(DEFAULT_SOLVE, null, 2))}>
           Reset
         </button>
       </div>
       {phase.state === "submitting" && <p>Submitting…</p>}
-      {phase.state === "polling" && (
-        <p>
-          Job <code>{phase.id.slice(0, 8)}</code> is {phase.status}…
-        </p>
-      )}
+      {phase.state === "polling" && <Running id={phase.id} job={phase.job} />}
       {phase.state === "error" && <p className="error">{phase.message}</p>}
       {phase.state === "done" && <JobView job={phase.job} name={name} />}
       {recent.length > 0 && (
@@ -131,8 +152,35 @@ export function Solver({ names }: { names: Map<string, string> }) {
   );
 }
 
+function Running({ id, job }: { id: string; job?: SolveJob }) {
+  const status = job?.status ?? "pending";
+  const p = job?.progress;
+  return (
+    <p>
+      Job <code>{id.slice(0, 8)}</code> is {status}
+      {job?.stop_requested && ", stopping"}
+      {status === "pending" && " (waiting for a free slot)"}
+      {p ? <> · {describeProgress(p)}</> : "…"}
+    </p>
+  );
+}
+
+function describeProgress(p: SolveProgress): string {
+  const pct = p.total > 0 ? ` (${fmt((100 * p.done) / p.total, 1)}%)` : "";
+  const seconds = `${fmt(p.elapsed_ms / 1000, 1)} s`;
+  if (p.phase === "rescoring") {
+    return `re-scoring finalists with the simulator: ${fmt(p.done)} of ${fmt(p.total)} · ${seconds}`;
+  }
+  const unit = p.strategy === "annealing" ? "steps" : "assignments";
+  return (
+    `${p.strategy} search: ${fmt(p.done)} of ${fmt(p.total)} ${unit}${pct} · ` +
+    `${fmt(p.evaluations)} evaluations · best ${fmt(p.best_score)} vs start ${fmt(p.initial_score)} · ${seconds}`
+  );
+}
+
 function JobView({ job, name }: { job: SolveJob; name: (id: string) => string }) {
   if (job.status === "failed") return <p className="error">Solve failed: {job.error ?? "unknown error"}</p>;
+  if (job.status === "cancelled") return <p className="muted">Solve cancelled before it started.</p>;
   const r = job.result;
   if (!r) return <p className="error">Solve finished without a result.</p>;
   const occupants = (c: Candidate) =>
@@ -156,6 +204,13 @@ function JobView({ job, name }: { job: SolveJob; name: (id: string) => string })
       </h3>
       <p>
         Starting assignment scored {fmt(r.initial.score)}; best finalist {fmt(r.candidates[0]?.score ?? 0)}.
+        {r.stopped && (
+          <span className="warn">
+            {" "}
+            The search was {r.stopped === "time_budget" ? "cut off by its time budget" : "stopped on request"}, so
+            these are the best found until then.
+          </span>
+        )}
       </p>
       <table>
         <thead>

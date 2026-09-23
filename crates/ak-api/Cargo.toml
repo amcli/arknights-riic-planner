@@ -1,10 +1,13 @@
 [package]
 name = "ak-api"
-description = "Axum HTTP API: game-data endpoints and the Layer 4 simulator"
+description = "Axum HTTP API: game data, simulation, stored documents and background solves — Layer 7"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "ak-api"
@@ -21,10 +24,17 @@ axum = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tower = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

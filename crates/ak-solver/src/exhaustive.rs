@@ -4,18 +4,21 @@
 use ak_domain::Assignment;
 
 use crate::anneal::TopK;
+use crate::control::{CHECK_EVERY, Tracker};
 use crate::evaluator::Evaluator;
 use crate::result::SolveError;
 use crate::space::Space;
 
 /// Scores every distinct assignment of the pool to the variable slots,
 /// starting from `start` (whose variable slots must be empty), and feeds
-/// `top`. Returns how many were scored.
+/// `top`. Returns how many were scored, which is fewer than the space holds
+/// when `tracker` stops the walk.
 pub fn enumerate(
     space: &Space,
     start: &Assignment,
     evaluator: &mut dyn Evaluator,
     top: &mut TopK,
+    tracker: &mut Tracker<'_>,
 ) -> Result<u64, SolveError> {
     let groups: Vec<(Vec<usize>, bool)> = space
         .groups()
@@ -26,32 +29,52 @@ pub fn enumerate(
         groups: &groups,
         evaluator,
         top,
+        tracker,
         assignment: start.clone(),
         used: vec![false; space.pool.len()],
         scored: 0,
+        halted: false,
     };
     walk.group(0, 0, 0)?;
-    Ok(walk.scored)
+    let scored = walk.scored;
+    let evaluations = walk.evaluator.evaluations();
+    walk.tracker.report(scored as f64, evaluations);
+    Ok(scored)
 }
 
-struct Walk<'a> {
+struct Walk<'a, 't> {
     space: &'a Space,
     groups: &'a [(Vec<usize>, bool)],
     evaluator: &'a mut dyn Evaluator,
     top: &'a mut TopK,
+    tracker: &'a mut Tracker<'t>,
     assignment: Assignment,
     used: Vec<bool>,
     scored: u64,
+    /// Set when the tracker says stop; the walk then unwinds.
+    halted: bool,
 }
 
-impl Walk<'_> {
+impl Walk<'_, '_> {
     /// Fills group `gi` from its slot `si`, choosing operators with pool
     /// index at least `min_op` (so an unordered room is filled in one order
     /// only), then moves on.
     fn group(&mut self, gi: usize, si: usize, min_op: usize) -> Result<(), SolveError> {
+        if self.halted {
+            return Ok(());
+        }
         if gi == self.groups.len() {
+            if self.scored.is_multiple_of(CHECK_EVERY)
+                && self
+                    .tracker
+                    .checkpoint(self.scored as f64, self.evaluator.evaluations())
+            {
+                self.halted = true;
+                return Ok(());
+            }
             let score = self.evaluator.score(&self.assignment)?;
             self.scored += 1;
+            self.tracker.saw(score.value);
             let key = self.space.canonical(&self.assignment);
             self.top.insert(score, key, self.assignment.clone());
             return Ok(());
@@ -65,6 +88,9 @@ impl Walk<'_> {
         let slot = self.space.slots[slots[si]].clone();
         let first = if ordered { 0 } else { min_op };
         for p in first..self.space.pool.len() {
+            if self.halted {
+                break;
+            }
             if self.used[p] {
                 continue;
             }

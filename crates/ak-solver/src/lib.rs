@@ -14,11 +14,14 @@
 //!    ranked by that, and the best one's simulation is returned in full.
 //!
 //! Everything is deterministic: the same request and seed give the same
-//! result. `ak-solver` depends only on `ak-domain` and `ak-eval`.
+//! result, unless a time budget or an [`Observer`] ends the search early
+//! (which [`SolveResult::stopped`] records). `ak-solver` depends only on
+//! `ak-domain` and `ak-eval`.
 
 #![forbid(unsafe_code)]
 
 pub mod anneal;
+pub mod control;
 pub mod evaluator;
 pub mod exhaustive;
 pub mod objective;
@@ -30,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use ak_domain::{Assignment, GameData};
 pub use anneal::{AnnealReport, Entry, TopK};
+pub use control::{Observer, Phase, Progress, StopReason, Tracker, Unobserved};
 pub use evaluator::{Evaluator, Score, Simulation, SteadyState};
 pub use objective::{Breakdown, Objective, Shifts};
 pub use result::{
@@ -40,6 +44,16 @@ pub use space::Space;
 
 /// Runs a solve.
 pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveError> {
+    solve_with(data, req, &mut Unobserved)
+}
+
+/// Runs a solve, reporting progress to `observer` and letting it end the
+/// search early (see [`control`]).
+pub fn solve_with(
+    data: &GameData,
+    req: &SolveRequest,
+    observer: &mut dyn Observer,
+) -> Result<SolveResult, SolveError> {
     let started = Instant::now();
     req.solver.validate()?;
     req.config.validate()?;
@@ -85,10 +99,17 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
         &req.objective,
     );
     let inner = req.solver.inner;
-    let deadline = req
-        .solver
-        .time_budget_ms
-        .map(|ms| started + Duration::from_millis(ms));
+    let planned = match strategy {
+        Strategy::Annealing => f64::from(req.solver.restarts) * f64::from(req.solver.iterations),
+        _ => estimated,
+    };
+    let mut tracker = Tracker::new(
+        observer,
+        started,
+        req.solver.time_budget_ms.map(Duration::from_millis),
+        strategy,
+        planned,
+    );
     let mut top = TopK::new(req.solver.top_k);
 
     let (initial_inner, evaluations) = {
@@ -97,6 +118,7 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
             InnerEvaluator::Simulation => &mut sim,
         };
         let initial_inner = evaluator.score(&initial)?;
+        tracker.set_initial(initial_inner.value);
         top.insert(
             initial_inner.clone(),
             space.canonical(&initial),
@@ -112,12 +134,13 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
                 }
                 let mut start = initial.clone();
                 space.clear_variable(&mut start);
-                exhaustive::enumerate(&space, &start, evaluator, &mut top)?;
+                exhaustive::enumerate(&space, &start, evaluator, &mut top, &mut tracker)?;
             }
             Strategy::Annealing => {
                 for restart in 0..req.solver.restarts {
-                    if let Some(d) = deadline
-                        && Instant::now() >= d
+                    let done = f64::from(restart) * f64::from(req.solver.iterations);
+                    if tracker.stopped().is_some()
+                        || tracker.checkpoint(done, evaluator.evaluations())
                     {
                         break;
                     }
@@ -128,7 +151,7 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
                         &req.solver,
                         &mut top,
                         u64::from(restart),
-                        deadline,
+                        &mut tracker,
                     )?;
                 }
             }
@@ -136,6 +159,7 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
         };
         (initial_inner, evaluator.evaluations())
     };
+    let stopped = tracker.stopped();
 
     // Finalists: re-score with the simulator when the inner evaluator was
     // the proxy; the best is always simulated for the report.
@@ -154,11 +178,14 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
         });
     }
     if rescore {
+        // Every finalist, then the starting assignment once more.
+        tracker.start_rescoring(entries.len() + 1, evaluations);
         let mut simulated = Vec::with_capacity(entries.len());
         for e in entries {
             let result = sim.run(&e.assignment)?;
             let score = sim.score_result(&result);
             simulated.push((e, score, result));
+            tracker.report(simulated.len() as f64, evaluations);
         }
         simulated.sort_by(|a, b| {
             b.1.value
@@ -178,9 +205,11 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
             });
         }
     } else {
+        tracker.start_rescoring(1, evaluations);
         for (i, e) in entries.into_iter().enumerate() {
             if i == 0 {
                 best_simulation = Some(sim.run(&e.assignment)?);
+                tracker.report(1.0, evaluations);
             }
             candidates.push(Candidate {
                 assignment: e.assignment,
@@ -195,6 +224,7 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
     let initial_candidate = if rescore {
         let result = sim.run(&initial)?;
         let score = sim.score_result(&result);
+        tracker.report(candidates.len() as f64 + 1.0, evaluations);
         Candidate {
             assignment: initial,
             inner_score: initial_inner.value,
@@ -228,5 +258,6 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveEr
         evaluations,
         simulations: sim.evaluations(),
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        stopped,
     })
 }
