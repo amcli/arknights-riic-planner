@@ -106,6 +106,14 @@ fn maxed() -> Roster {
     Roster::everyone_maxed(data())
 }
 
+/// True when the only events are rig workers running out of morale at the
+/// very end of a 24-hour run: a lone worker drains 1.0/h from 24.
+fn quiet(events: &[SimEvent]) -> bool {
+    events
+        .iter()
+        .all(|e| matches!(e.kind, EventKind::Exhausted { .. }) && e.hour > 23.9)
+}
+
 #[track_caller]
 fn approx(actual: f64, expected: f64, tol: f64) {
     assert!(
@@ -117,14 +125,66 @@ fn approx(actual: f64, expected: f64, tol: f64) {
 // ---- Factory -----------------------------------------------------------
 
 #[test]
-fn idle_gold_factory_is_the_baseline() {
-    // Pure Gold takes 72 min (cost_point 4320 s) at 100%: 20 per day.
+fn one_skill_less_operator_is_the_baseline() {
+    // Pure Gold takes 72 min (cost_point 4320 s) at 100%: 20 per day, and
+    // the one operator adds the 1% base bonus.
+    let op = without_skills_for(RoomType::Manufacture, 1);
     let b = base(vec![gold_factory("f1", 3)]);
-    let a = Assignment::empty(&b, data());
+    let a = assign(&b, &[("f1", &op)]);
     let r = simulate(data(), &request(b, a)).unwrap();
-    approx(r.totals.gold_produced, 20.0, 1e-6);
-    assert_eq!(r.rooms[1].initial_stat_pct, Some(100.0));
-    assert!(r.events.is_empty(), "{:?}", r.events);
+    approx(r.totals.gold_produced, 20.2, 1e-6);
+    assert_eq!(r.rooms[1].initial_stat_pct, Some(101.0));
+    assert!(quiet(&r.events), "{:?}", r.events);
+}
+
+#[test]
+fn unstaffed_rooms_do_no_work_except_power_plants() {
+    // wiki.gg Factory, Trading Post: they "will only function when at least
+    // one Operator is assigned"; Human Resources Office likewise. wiki.gg
+    // Power Plant: drones charge unstaffed, one per 6 minutes.
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("t1", RoomType::Trading, 3),
+        Room::new("h1", RoomType::Hire, 3),
+    ]);
+    let a = Assignment::empty(&b, data());
+    let mut req = request(b.clone(), a.clone());
+    req.config.initial_gold = 50.0;
+    let r = simulate(data(), &req).unwrap();
+    approx(r.totals.gold_produced, 0.0, 1e-12);
+    approx(r.totals.lmd, 0.0, 1e-12);
+    approx(r.totals.contacts, 0.0, 1e-12);
+    for room in &r.rooms {
+        let expected = match room.kind {
+            RoomType::Power => Some(100.0),
+            RoomType::Manufacture | RoomType::Trading | RoomType::Hire => Some(0.0),
+            _ => None,
+        };
+        assert_eq!(room.initial_stat_pct, expected, "{}", room.id);
+    }
+    let plants = b.count_of(RoomType::Power) as f64;
+    approx(r.totals.drones, 24.0 * 10.0 * plants, 1e-6);
+
+    // One operator anywhere in the Factory is enough, even at zero morale:
+    // only their skills stop.
+    let op = without_skills_for(RoomType::Manufacture, 1);
+    let staffed = assign(&b, &[("f1", &op)]);
+    let snap = evaluate(data(), &b, &staffed, &maxed(), &SimConfig::default()).unwrap();
+    approx(snap.rooms[1].productivity_pct, 101.0, 1e-9);
+    let mut tired = maxed();
+    tired.insert(
+        op[0].clone(),
+        RosterEntry {
+            promotion: UnlockCond::MAX,
+            mood: Some(0.0),
+        },
+    );
+    let config = SimConfig {
+        initial_mood: MoodPolicy::Roster,
+        ..SimConfig::default()
+    };
+    let snap = evaluate(data(), &b, &staffed, &tired, &config).unwrap();
+    approx(snap.rooms[1].productivity_pct, 100.0, 1e-9);
 }
 
 #[test]
@@ -295,33 +355,37 @@ fn team_rainbow_zeroes_control_center_drain() {
 
 #[test]
 fn trading_post_throughput_matches_order_table() {
-    // Level 3 mix: E[LMD] 1450, E[gold] 2.9, E[time] 203.4 min.
+    // Level 3 mix: E[LMD] 1450, E[gold] 2.9, E[time] 203.4 min, at the 101%
+    // one skill-less operator gives.
+    let op = without_skills_for(RoomType::Trading, 1);
     let b = base(vec![Room::new("t1", RoomType::Trading, 3)]);
-    let a = Assignment::empty(&b, data());
+    let a = assign(&b, &[("t1", &op)]);
     let mut req = request(b, a);
     req.config.initial_gold = 1000.0;
     let r = simulate(data(), &req).unwrap();
-    let orders = 24.0 * 60.0 / 203.4;
+    let orders = 24.0 * 60.0 / 203.4 * 1.01;
     approx(r.totals.orders_completed, orders, 1e-6);
     approx(r.totals.lmd, orders * 1450.0, 1e-3);
     approx(r.totals.gold_consumed, orders * 2.9, 1e-6);
     approx(r.totals.gold_in_depot, 1000.0 - orders * 2.9, 1e-6);
-    assert!(r.events.is_empty(), "{:?}", r.events);
+    assert!(quiet(&r.events), "{:?}", r.events);
 }
 
 #[test]
 fn trading_post_lives_off_the_factories() {
-    // One gold Factory makes 20/day; a level-3 post wants 20.53. Every unit
-    // produced is sold and the post reports starvation.
+    // One gold Factory at 101% makes 20.2/day; a level-3 post at 101% wants
+    // 20.73. Every unit produced is sold and the post reports starvation.
+    let maker = without_skills_for(RoomType::Manufacture, 1);
+    let seller = without_skills_for_excluding(RoomType::Trading, 1, &maker);
     let b = base(vec![
         gold_factory("f1", 3),
         Room::new("t1", RoomType::Trading, 3),
     ]);
-    let a = Assignment::empty(&b, data());
+    let a = assign(&b, &[("f1", &maker), ("t1", &seller)]);
     let r = simulate(data(), &request(b, a)).unwrap();
-    approx(r.totals.gold_produced, 20.0, 1e-6);
-    approx(r.totals.gold_consumed, 20.0, 1e-6);
-    approx(r.totals.lmd, 20.0 / 2.9 * 1450.0, 1e-3);
+    approx(r.totals.gold_produced, 20.2, 1e-6);
+    approx(r.totals.gold_consumed, 20.2, 1e-6);
+    approx(r.totals.lmd, 20.2 / 2.9 * 1450.0, 1e-3);
     assert!(
         r.events
             .iter()
@@ -334,9 +398,11 @@ fn trading_post_lives_off_the_factories() {
 #[test]
 fn periodic_collection_caps_factory_storage() {
     // A level-1 store holds 24 volume, and Pure Gold takes 2 (PRTS 制造站):
-    // 12 units, which is 14.4 h of output at 100%.
+    // 12 units, which is 14.4 h of output at 100%, 14.26 h at the 101% one
+    // skill-less operator gives.
+    let op = without_skills_for(RoomType::Manufacture, 1);
     let b = base(vec![gold_factory("f1", 1)]);
-    let a = Assignment::empty(&b, data());
+    let a = assign(&b, &[("f1", &op)]);
     let mut req = request(b, a);
     req.config.horizon_hours = 48.0;
     req.config.collection = CollectionPolicy::EveryHours { hours: 48.0 };
@@ -348,7 +414,7 @@ fn periodic_collection_caps_factory_storage() {
             .any(|e| matches!(&e.kind, EventKind::StorageFull { .. }))
     );
     let f = &r.rooms[1];
-    approx(f.hours_blocked, 48.0 - 14.4, 1e-6);
+    approx(f.hours_blocked, 48.0 - 14.4 / 1.01, 1e-6);
     approx(f.in_storage, 0.0, 1e-9);
 }
 
@@ -814,10 +880,11 @@ fn base_validation_enforces_power_and_layout() {
 #[test]
 fn input_bound_formulas_need_a_stock() {
     // Dualchips take one second a batch, so output is set by inputs.
+    let op = without_skills_for(RoomType::Manufacture, 1);
     let b = base(vec![
         Room::new("f1", RoomType::Manufacture, 3).with_formula("5"),
     ]);
-    let a = Assignment::empty(&b, data());
+    let a = assign(&b, &[("f1", &op)]);
     let r = simulate(data(), &request(b.clone(), a.clone())).unwrap();
     assert!(r.totals.items.is_empty());
     assert!(
@@ -845,16 +912,17 @@ fn input_bound_formulas_need_a_stock() {
 
 #[test]
 fn shard_formula_spends_lmd() {
-    // Formula 13: one Originium Shard per hour for two Orirock Cubes and
-    // 1600 LMD.
+    // Formula 13: one Originium Shard per hour at 100% for two Orirock
+    // Cubes and 1600 LMD; one skill-less operator makes it 101%.
+    let op = without_skills_for(RoomType::Manufacture, 1);
     let b = base(vec![
         Room::new("f1", RoomType::Manufacture, 3).with_formula("13"),
     ]);
-    let a = Assignment::empty(&b, data());
+    let a = assign(&b, &[("f1", &op)]);
     let r = simulate(data(), &request(b, a)).unwrap();
-    approx(r.totals.items[&ItemId::new("3141")], 24.0, 1e-6);
-    approx(r.totals.lmd_spent, 24.0 * 1600.0, 1e-3);
-    approx(r.totals.shards_in_depot, 24.0, 1e-6);
+    approx(r.totals.items[&ItemId::new("3141")], 24.24, 1e-6);
+    approx(r.totals.lmd_spent, 24.24 * 1600.0, 1e-3);
+    approx(r.totals.shards_in_depot, 24.24, 1e-6);
 }
 
 /// Sum of an operator's maxed Dormitory mood clauses with a given target,

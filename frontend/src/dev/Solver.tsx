@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Candidate, type SolveJob, type SolveProgress, type SolveRequest, type SolveSummary } from "./api";
+import { api, type Candidate, type SolveJob, type SolveProgress, type SolveRequest, type SolveSummary } from "../api";
 import { DEFAULT_REQUEST, ResultView } from "./Simulator";
 
 // The simulator's small base, handed to the solver with its assignment as

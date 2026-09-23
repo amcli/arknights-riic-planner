@@ -42,6 +42,43 @@ pub use result::{
 };
 pub use space::Space;
 
+/// Simulates one assignment exactly as a solve of `req` scores its
+/// finalists: with a `mood_threshold` rotation, every pool operator the
+/// assignment leaves unplaced joins the bench. Use it to inspect a finalist
+/// other than the best, whose simulation the result does not carry.
+pub fn simulate_candidate(
+    data: &GameData,
+    req: &SolveRequest,
+    assignment: &Assignment,
+) -> Result<ak_eval::SimResult, SolveError> {
+    req.config.validate()?;
+    let initial = req
+        .initial
+        .clone()
+        .unwrap_or_else(|| Assignment::empty(&req.base, data));
+    let space = Space::new(
+        data,
+        &req.base,
+        &req.roster,
+        req.pool.as_deref(),
+        &initial,
+        &req.locked,
+    )?;
+    assignment
+        .check(&req.base, data)
+        .map_err(ak_eval::SimError::from)?;
+    let mut sim = Simulation::new(
+        data,
+        &req.base,
+        &req.roster,
+        &req.config,
+        &req.rotation,
+        &space.pool,
+        &req.objective,
+    );
+    Ok(sim.run(assignment)?)
+}
+
 /// Runs a solve.
 pub fn solve(data: &GameData, req: &SolveRequest) -> Result<SolveResult, SolveError> {
     solve_with(data, req, &mut Unobserved)

@@ -7,7 +7,7 @@ import {
   type SimResult,
   type Snapshot,
   type Tagged,
-} from "./api";
+} from "../api";
 
 // A small valid base: Control Center with Team Rainbow, one Power Plant,
 // one gold Factory, the Texas/Lappland/Exusiai Trading Post and a Dormitory.

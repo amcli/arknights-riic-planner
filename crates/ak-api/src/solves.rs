@@ -167,6 +167,40 @@ pub async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> Result<R
     Ok((status, Json(current(&s, id).await?)).into_response())
 }
 
+/// `GET /api/v1/solves/{id}/candidates/{n}/simulation`: the full
+/// simulation of finalist `n` (0 is the best), run the way the solve scored
+/// it. The best one's comes from the result; the others are simulated on
+/// request.
+pub async fn candidate_simulation(
+    State(s): State<AppState>,
+    Path((id, n)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    let doc = stored::fetch(&s, Collection::Solves, id.clone()).await?;
+    let Stored { body: job, .. } = stored::view::<SolveJob>(doc)?;
+    let Some(result) = job.result else {
+        return Err(ApiError::conflict(format!(
+            "solve {id} is {}; it has no finalists yet",
+            job.status.as_str()
+        )));
+    };
+    let Some(candidate) = result.candidates.get(n) else {
+        return Err(ApiError::not_found(format!(
+            "solve {id} has {} finalists; there is no number {n}",
+            result.candidates.len()
+        )));
+    };
+    if n == 0
+        && let Some(best) = result.best_simulation
+    {
+        return Ok(Json(best).into_response());
+    }
+    let (data, request, assignment) = (s.data.clone(), job.request, candidate.assignment.clone());
+    let sim = blocking(move || ak_solver::simulate_candidate(&data, &request, &assignment))
+        .await?
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(sim).into_response())
+}
+
 /// `DELETE /api/v1/solves/{id}`: stops the solve if it is queued or
 /// running, and removes it.
 pub async fn delete(
