@@ -667,3 +667,33 @@ fn a_run_of_missed_draws_does_not_end_the_search() {
     assert!(empty_pool.neighbours(&nobody).is_empty());
     assert!(empty_pool.propose(&nobody, &mut rng).is_none());
 }
+
+#[test]
+fn a_candidate_simulates_as_the_solve_scored_it() {
+    let mut req = example_solve(SolverConfig {
+        strategy: Strategy::Annealing,
+        iterations: 150,
+        restarts: 1,
+        top_k: 3,
+        ..SolverConfig::default()
+    });
+    req.rotation = Rotation::MoodThreshold {
+        swap_out: 4.0,
+        swap_in: 20.0,
+        bench: Vec::new(),
+    };
+    req.config.horizon_hours = 48.0;
+    let r = solve(data(), &req).unwrap();
+    // The best one's simulation is the one the result carries.
+    let best = simulate_candidate(data(), &req, &r.candidates[0].assignment).unwrap();
+    assert_eq!(Some(&best), r.best_simulation.as_ref());
+    // Every finalist re-simulates to the score it was ranked by.
+    for c in &r.candidates {
+        let sim = simulate_candidate(data(), &req, &c.assignment).unwrap();
+        let score = req.objective.value(&Breakdown::from_result(&sim));
+        approx(score, c.score, 1e-9 * c.score.abs().max(1.0));
+    }
+    // An assignment that does not fit the base is refused.
+    let wrong = Assignment::with_capacities([("nowhere", 1u8)]);
+    assert!(simulate_candidate(data(), &req, &wrong).is_err());
+}

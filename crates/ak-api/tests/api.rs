@@ -329,9 +329,9 @@ async fn simulate_matches_the_library() {
     let parsed: SimRequest = serde_json::from_value(req.clone()).unwrap();
     let direct = ak_eval::simulate(&data(), &parsed).unwrap();
     assert_eq!(result, wire(&direct));
-    // The reference numbers for this base.
+    // The reference numbers for this base (f2 and f4 are unstaffed).
     let lmd = result["totals"]["lmd"].as_f64().unwrap();
-    assert!((20_000.0..20_200.0).contains(&lmd), "{lmd}");
+    assert!((10_000.0..10_200.0).contains(&lmd), "{lmd}");
 
     let (status, snapshot) = h.post("/api/v1/evaluate", req.clone()).await;
     assert_eq!(status, StatusCode::OK, "{snapshot}");
@@ -847,4 +847,81 @@ async fn rosters_import_from_other_tools() {
     assert_eq!(job["result"]["space"]["pool"], 10);
     let best = &job["result"]["candidates"][0];
     assert!(best["score"].as_f64().unwrap() > 0.0, "{}", best["score"]);
+}
+
+// ---- frontend support ------------------------------------------------------
+
+#[tokio::test]
+async fn layout_and_constants_for_drawing_a_base() {
+    let h = Harness::new(Limits::default());
+    let (status, layout) = h.get("/api/v1/gamedata/layout").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(layout["id"], "v0");
+    let slots = layout["slots"].as_array().unwrap();
+    assert_eq!(slots.len(), data().layout.slots.len());
+    let output = slots.iter().filter(|s| s["category"] == "OUTPUT").count();
+    assert_eq!(output, 9);
+    let cc = slots.iter().find(|s| s["category"] == "SPECIAL").unwrap();
+    assert_eq!(cc["size"], json!({ "rows": 4, "cols": 8 }));
+
+    let (status, constants) = h.get("/api/v1/gamedata/constants").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(constants["comfort_limit"], data().constants.comfort_limit);
+
+    let (_, op) = h.get("/api/v1/gamedata/operators").await;
+    let exusiai = op
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "char_103_angel")
+        .unwrap();
+    assert_eq!(exusiai["max_levels"], json!([50, 80, 90]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_finalist_can_be_simulated() {
+    let h = Harness::new(Limits::default());
+    let mut req = quick_solve();
+    req["solver"]["top_k"] = json!(3);
+    let id = h.create("solves", json!({ "request": req })).await;
+
+    // Not before it has finished.
+    let (status, _) = h
+        .get(&format!("/api/v1/solves/{id}/candidates/0/simulation"))
+        .await;
+    assert!(
+        status == StatusCode::CONFLICT || status == StatusCode::OK,
+        "{status}"
+    );
+
+    let job = h.wait_for(&id, "done", is("done")).await;
+    let result = &job["result"];
+    let n = result["candidates"].as_array().unwrap().len();
+    assert!(n >= 2, "{n} finalists");
+
+    let (status, best) = h
+        .get(&format!("/api/v1/solves/{id}/candidates/0/simulation"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(best, result["best_simulation"]);
+
+    let (status, other) = h
+        .get(&format!("/api/v1/solves/{id}/candidates/1/simulation"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(
+        other["horizon_hours"],
+        result["best_simulation"]["horizon_hours"]
+    );
+    let lmd = other["totals"]["lmd"].as_f64().unwrap();
+    let expected = result["candidates"][1]["breakdown"]["lmd"]
+        .as_f64()
+        .unwrap();
+    assert!((lmd - expected).abs() < 1e-6, "{lmd} vs {expected}");
+
+    let (status, err) = h
+        .get(&format!("/api/v1/solves/{id}/candidates/{n}/simulation"))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(error_of(&err).contains("finalists"), "{err}");
 }

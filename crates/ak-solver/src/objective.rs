@@ -178,6 +178,9 @@ impl Breakdown {
             let Some((stat, _)) = rs.main_stat() else {
                 continue;
             };
+            if rs.headcount == 0 && !rules::works_unstaffed(rs.kind) {
+                continue;
+            }
             let bonus = rules::basic_speed_buff(c, rs.kind) * 100.0;
             let mut stat_hours = 100.0 * h;
             for m in &snapshot.mood {

@@ -16,7 +16,7 @@ design; this README tracks what actually exists.
 | 6. Persistence | `ak-store` | **Done, file-backed.** Versioned JSON documents for rosters, bases and solve jobs, migrated on read. The Postgres backend the plan calls for waits for a database; the trait is in place. |
 | 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. JSON errors throughout, work limits, gzip, opt-in CORS. |
 | 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (current, row and legacy shapes) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
-| 9. Frontend | `frontend/` | Vite + React + TS: game-data overview, a simulator panel, a solver panel with job polling, and the operator list. |
+| 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines. |
 
 **Ingestion coverage (pinned en_US snapshot):** 374 / 374 operators with
 base skills, 640 / 640 skill tiers, 0 skipped under strict mode.
@@ -151,6 +151,11 @@ orders use expected values.
 | Office | one contact per 12 hours | 3 stored, under periodic collection |
 | Training Room | one base hour of progress per hour | stops when the level completes (8, 16 or 24 base hours) |
 
+A Factory, Trading Post or Office with nobody stationed does nothing; a
+Power Plant still charges drones at its base rate (wiki.gg Factory, Trading
+Post, Human Resources Office, Power Plant). An operator at zero morale
+still counts as stationed: only their skills stop.
+
 Working rooms drain 1.0 morale per hour. Factories and Trading Posts drain
 0.05 less with two operators and 0.10 less with three, and every active
 Control Center operator takes 0.05 per hour off every working operator.
@@ -241,9 +246,10 @@ One consequence to know about: within a 24-hour horizon at full morale,
 morale is free, so without rotation the solver will happily dismantle a
 Control Center morale crew to put bodies in Factories. Enable rotation or
 lengthen the horizon and the crew earns its keep: on the example base with
-`mood_threshold` rotation over 72 hours, the solver keeps Team Rainbow in
-the Control Center and lifts the score from 176 k to 227 k in about two
-seconds (6 100 proxy evaluations, 7 simulations).
+`mood_threshold` rotation over 72 hours, the solver keeps most of Team
+Rainbow in the Control Center and lifts the score from 122 k to 223 k in
+about two seconds (6 100 proxy evaluations, 7 simulations). The starting
+assignment scores low because two of its Factories are unstaffed.
 
 ## How Layer 6 works
 
@@ -376,6 +382,42 @@ cargo run -p ak-cli -- import krooster roster.json                  # summary an
 cargo run -p ak-cli -- import ak-planner plan.json --out roster.json  # write the canonical roster
 ```
 
+## How Layer 9 works
+
+The frontend (`frontend/`, Vite + React + TypeScript, no router or chart
+library) has one screen per step, switched by the URL hash:
+
+- **Rosters** (`#/rosters`): paste or open another tool's export (or the
+  canonical JSON), preview what it reads as, with every warning named, and
+  save it. Stored rosters list their operators and import report.
+- **Base** (`#/base`): rooms with their level, Factory formula, Trading Post
+  orders, Dormitory ambience and Training Room job; running totals of power
+  and of production, dormitory and function slots, from the same data the
+  server validates with; and the base on the in-game floor plan
+  (`building_data.layouts.v0`), each room in a slot of its category and
+  size.
+- **Plan** (`#/plan`): a stored base and roster, the horizon (24 h, 72 h, a
+  week), rotation thresholds, the objective weights with their defaults,
+  operators pinned to rooms (sent as the starting assignment plus locked
+  slots), and an effort preset (Quick, Standard, Thorough) that sets
+  iterations, restarts and the time budget. It defaults to 72 hours with
+  rotation, where morale relief has a price.
+- **Results** (`#/results/{id}`): live progress with a Stop button while the
+  solve runs; then per-day tiles against the start, the finalists with their
+  trade-offs, the chosen finalist on the floor plan with changes against the
+  best (or the start) outlined and listed, output per room per day, morale
+  as one sparkline per operator grouped by room (hover or arrow keys for a
+  reading; exhaustion is marked with a dot and the word), and everything the
+  model could not honour. Finalists other than the best are simulated on
+  request, the way the solve scored them.
+- **Game data** (`#/data`): provenance, every operator, and the raw
+  simulate and solve panels for developers.
+
+The chart colours are the first three slots of a palette validated for
+colour-blind separation in light and dark mode; every coloured thing also
+carries a text label. Item names for Factory formulas are a display table in
+`frontend/src/format.ts`, since the item table is not ingested.
+
 ## Layout
 
 ```
@@ -401,7 +443,10 @@ crates/
     tests/api.rs        the router driven in-process
   ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve | import`
 examples/requests/      simulation and solve requests for a 2-4-3 base
-frontend/               Vite + React + TypeScript
+frontend/               Layer 9: Vite + React + TypeScript
+  src/views/            Rosters, Base, Plan, Results, Game data screens
+  src/components/       BaseMap (floor plan SVG), MoraleTable (sparklines)
+  src/dev/              raw simulate and solve panels
 ```
 
 Dependency direction is strictly `ak-domain ← ak-data ← {sync, cli, api}`,
@@ -439,7 +484,7 @@ manifest, so a half-done bump fails loudly.
 ## Running
 
 ```bash
-cargo test --workspace                     # 157 tests, a few seconds after the first build
+cargo test --workspace                     # 161 tests, a few seconds after the first build
 cargo run -p ak-data-sync -- check         # verify pins, digests, schema, transform
 cargo run -p ak-cli -- stats               # counts + parser coverage as JSON
 cargo run -p ak-cli -- op char_285_medic2  # one operator, resolved skills
@@ -452,7 +497,7 @@ cargo run -p ak-api -- --help              # limits, CORS origins, store and dat
 ```
 
 ```bash
-cd frontend && npm install && npm run dev  # proxies /api to the backend
+cd frontend && npm install && npm run dev  # http://localhost:5173, proxies /api to the backend
 ```
 
 API endpoints:
@@ -464,6 +509,8 @@ API endpoints:
 - `GET /api/v1/gamedata/skills/{id}` — includes `mechanics` (null if rejected)
 - `GET /api/v1/gamedata/facilities` — room kinds with per-level capacity, power and build cost
 - `GET /api/v1/gamedata/formulas` — Factory formulas
+- `GET /api/v1/gamedata/layout` — the base's slots with grid positions
+- `GET /api/v1/gamedata/constants` — global tuning values (Dormitory ambience limit, …)
 - `POST /api/v1/evaluate` — request → room stats, morale rates, contributions, warnings
 - `POST /api/v1/simulate` — request → totals, per-room and per-operator reports, morale trajectory, events, warnings
 - `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, source?, roster }`, where `source` is `manual` (default), `krooster` or `ak-planner`; answers with the import report
@@ -473,6 +520,7 @@ API endpoints:
 - `GET /api/v1/solves/{id}` — status, the request as it ran, `progress` while running, the result or error once finished
 - `POST /api/v1/solves/{id}/stop` — cancel if pending, end the search early if running
 - `DELETE /api/v1/solves/{id}` — stop if needed, then remove
+- `GET /api/v1/solves/{id}/candidates/{n}/simulation` — finalist `n` (0 is the best) simulated the way the solve scored it
 
 Evaluate, simulate and solve requests may use `base_id` / `roster_id` in
 place of `base` / `roster`. Invalid requests get `400` with a readable

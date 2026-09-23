@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use ak_data::stats::DataStats;
 use ak_domain::{
-    BaseSkill, DataVersion, Facility, ManufactureFormula, Operator, PowerId, Profession, Rarity,
+    BaseLayout, BaseSkill, DataVersion, Facility, GameConstants, ManufactureFormula, Operator,
+    PowerId, Profession, Rarity,
 };
 
 use crate::AppState;
@@ -44,6 +45,7 @@ struct OperatorSummary<'a> {
     nation: Option<&'a PowerId>,
     group: Option<&'a PowerId>,
     team: Option<&'a PowerId>,
+    max_levels: &'a [u32],
 }
 
 impl<'a> From<&'a Operator> for OperatorSummary<'a> {
@@ -58,6 +60,7 @@ impl<'a> From<&'a Operator> for OperatorSummary<'a> {
             nation: op.nation.as_ref(),
             group: op.group.as_ref(),
             team: op.team.as_ref(),
+            max_levels: &op.max_levels,
         }
     }
 }
@@ -102,4 +105,16 @@ pub async fn list_facilities(State(s): State<AppState>) -> Response {
 pub async fn list_formulas(State(s): State<AppState>) -> Response {
     let list: Vec<&ManufactureFormula> = s.data.manufacture_formulas.values().collect();
     Json(list).into_response()
+}
+
+/// `GET /api/v1/gamedata/layout`: the base's slots with their grid
+/// positions, for drawing a base.
+pub async fn layout(State(s): State<AppState>) -> Response {
+    Json::<&BaseLayout>(&s.data.layout).into_response()
+}
+
+/// `GET /api/v1/gamedata/constants`: global tuning values, such as the
+/// Dormitory ambience limit.
+pub async fn constants(State(s): State<AppState>) -> Response {
+    Json::<&GameConstants>(&s.data.constants).into_response()
 }

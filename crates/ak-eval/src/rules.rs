@@ -34,6 +34,7 @@
 //! | Factory storage | `outputCapacity` 24/36/54, formula `weight` | storage is volume; Pure Gold and Drill take 2, Frontline 3, Tactical 5, Dualchips 5 (PRTS 制造站) |
 //! | Drones | `laborRecoverTime` 360 s | 6 min per drone at 100% (PRTS 发电站) |
 //! | Office | none | 12 h per contact at 100%, 3 stored at most (PRTS 办公室) |
+//! | Unstaffed rooms | none | Factories and Trading Posts "will only function when at least one Operator is assigned" (wiki.gg Factory, Trading Post); the Office refreshes recruitment only with an Operator assigned (wiki.gg Human Resources Office); Power Plants charge drones unstaffed, "increased by 5% when an Operator is assigned" (wiki.gg Power Plant). A stationed operator at zero morale still counts: only their skills stop (wiki.gg Rhodes Island Infrastructure Complex) |
 //! | Training | none | Specialisation 1/2/3 take 8/16/24 h at 100%; only the assistant's skills apply; the trainee does not drain morale; the assistant drains only while training runs (PRTS 训练室) |
 //!
 //! Known gap: the Reception Room also produces clues (20 h base per clue,
@@ -164,6 +165,17 @@ pub fn exp_value(item: &str) -> Option<f64> {
 /// Converts an upstream per-second manpower rate to morale per hour.
 pub fn units_to_mood_per_hour(units_per_sec: f64, c: &GameConstants) -> f64 {
     units_per_sec * 3600.0 / f64::from(c.manpower_display_factor.max(1))
+}
+
+/// Whether a room of this kind works with nobody stationed. Factories,
+/// Trading Posts and the Office stop; Power Plants keep charging drones.
+/// Training Rooms are governed by their job instead (see
+/// [`spec_base_hours`]). Sources in the module docs.
+pub fn works_unstaffed(kind: RoomType) -> bool {
+    !matches!(
+        kind,
+        RoomType::Manufacture | RoomType::Trading | RoomType::Hire
+    )
 }
 
 /// Per-operator base efficiency bonus of a room kind (fraction, e.g. 0.01).

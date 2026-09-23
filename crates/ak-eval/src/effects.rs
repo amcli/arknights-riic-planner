@@ -1042,8 +1042,9 @@ impl<'e, 'a> Eval<'e, 'a> {
                 .iter()
                 .filter_map(|&k| sums.get(&(ri, k)).map(|v| (k, *v)))
                 .collect();
+            let staffed = headcount > 0 || rules::works_unstaffed(room.kind);
             let pct = |kind: RoomType, k: StatKind| {
-                if room.kind == kind {
+                if room.kind == kind && staffed {
                     (base_pct + get(k)).max(0.0)
                 } else {
                     0.0

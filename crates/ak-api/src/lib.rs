@@ -8,6 +8,8 @@
 //! GET    /api/v1/gamedata/skills/{id}      full skill tier
 //! GET    /api/v1/gamedata/facilities       room kinds, per-level parameters
 //! GET    /api/v1/gamedata/formulas         Factory formulas
+//! GET    /api/v1/gamedata/layout           base slots and grid positions
+//! GET    /api/v1/gamedata/constants        global tuning values
 //! POST   /api/v1/evaluate                  request → Snapshot
 //! POST   /api/v1/simulate                  request → SimResult
 //! POST   /api/v1/rosters                   { name?, source?, roster } → 201 + metadata, import report
@@ -26,6 +28,8 @@
 //! GET    /api/v1/solves/{id}               status, progress, result or error
 //! POST   /api/v1/solves/{id}/stop          cancel if pending, stop early if running
 //! DELETE /api/v1/solves/{id}               stop and remove
+//! GET    /api/v1/solves/{id}/candidates/{n}/simulation
+//!                                          finalist n simulated as the solve scored it
 //! ```
 //!
 //! Requests to evaluate, simulate or solve may name a stored base or
@@ -155,6 +159,8 @@ pub fn router(state: AppState) -> Router {
             get(gamedata::list_facilities),
         )
         .route("/api/v1/gamedata/formulas", get(gamedata::list_formulas))
+        .route("/api/v1/gamedata/layout", get(gamedata::layout))
+        .route("/api/v1/gamedata/constants", get(gamedata::constants))
         .route("/api/v1/evaluate", post(simulation::evaluate))
         .route("/api/v1/simulate", post(simulation::simulate))
         .route("/api/v1/rosters", get(rosters::list).post(rosters::create))
@@ -174,6 +180,10 @@ pub fn router(state: AppState) -> Router {
             get(solves::get).delete(solves::delete),
         )
         .route("/api/v1/solves/{id}/stop", post(solves::stop))
+        .route(
+            "/api/v1/solves/{id}/candidates/{n}/simulation",
+            get(solves::candidate_simulation),
+        )
         .fallback(error::no_route)
         .method_not_allowed_fallback(error::wrong_method)
         .layer(CompressionLayer::new())

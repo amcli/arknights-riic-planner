@@ -100,6 +100,55 @@ export interface OperatorSummary {
   nation: string | null;
   group: string | null;
   team: string | null;
+  /** Highest level at each promotion; its length is one more than the highest promotion. */
+  max_levels: number[];
+}
+
+/** One buildable slot of the base, in grid cells (rows grow downward, B4 at the top). */
+export interface LayoutSlot {
+  id: string;
+  category: string;
+  size: { rows: number; cols: number };
+  offset: { row: number; col: number };
+  storey: string;
+}
+
+export interface BaseLayout {
+  id: string;
+  slots: LayoutSlot[];
+}
+
+/** Global tuning values; only the ones the frontend reads are typed. */
+export interface GameConstants {
+  comfort_limit: number;
+}
+
+// ---- Layer 3: bases ----------------------------------------------------------
+
+export type TradingStrategy = "gold" | "originium_shard";
+
+export interface RoomSettings {
+  formula?: string | null;
+  strategy?: TradingStrategy | null;
+  ambience?: number;
+  training?: { profession: Profession; subclass?: string | null; spec_level: number } | null;
+}
+
+export interface Room {
+  id: string;
+  kind: RoomType;
+  level: number;
+  settings?: RoomSettings;
+}
+
+export interface BaseConfig {
+  rooms: Room[];
+}
+
+/** A stored slot: room label and 0-based index. */
+export interface Slot {
+  room: string;
+  index: number;
 }
 
 // ---- Layer 4: simulation ---------------------------------------------------
@@ -282,6 +331,18 @@ export interface SolveResult {
   stopped?: "time_budget" | "requested";
 }
 
+/** The parts of a stored solve request the frontend reads back. */
+export interface StoredSolveRequest {
+  base: BaseConfig;
+  roster: Roster;
+  initial?: AssignmentMap | null;
+  locked?: Slot[];
+  config: { horizon_hours: number; tick_minutes: number } & Record<string, unknown>;
+  rotation: { kind: "none" } | { kind: "mood_threshold"; swap_out: number; swap_in: number; bench?: string[] };
+  objective: Record<string, number>;
+  solver: Record<string, unknown>;
+}
+
 /** A running solve's latest report. */
 export interface SolveProgress {
   phase: "searching" | "rescoring";
@@ -345,7 +406,7 @@ export interface SolveSummary extends DocumentMeta {
 export interface SolveJob extends DocumentMeta {
   status: JobStatus;
   /** The request as it ran: references resolved, server limits applied. */
-  request: SolveRequest;
+  request: StoredSolveRequest;
   /** Stored documents the request named. */
   refs?: { base_id?: string; roster_id?: string };
   attempts: number;
@@ -409,6 +470,8 @@ export const api = {
   operators: () => getJson<OperatorSummary[]>("/api/v1/gamedata/operators"),
   facilities: () => getJson<Facility[]>("/api/v1/gamedata/facilities"),
   formulas: () => getJson<Formula[]>("/api/v1/gamedata/formulas"),
+  layout: () => getJson<BaseLayout>("/api/v1/gamedata/layout"),
+  constants: () => getJson<GameConstants>("/api/v1/gamedata/constants"),
   evaluate: (request: SimRequest) => sendJson<Snapshot>("POST", "/api/v1/evaluate", request),
   simulate: (request: SimRequest) => sendJson<SimResult>("POST", "/api/v1/simulate", request),
   solves: {
@@ -418,6 +481,9 @@ export const api = {
     get: (id: string) => getJson<SolveJob>(`/api/v1/solves/${encodeURIComponent(id)}`),
     /** Cancels a pending solve, or ends a running one's search early. */
     stop: (id: string) => sendJson<SolveJob>("POST", `/api/v1/solves/${encodeURIComponent(id)}/stop`, {}),
+    /** Finalist `n` (0 is the best) simulated the way the solve scored it. */
+    simulation: (id: string, n: number) =>
+      getJson<SimResult>(`/api/v1/solves/${encodeURIComponent(id)}/candidates/${n}/simulation`),
     remove: (id: string) => deleteJson(`/api/v1/solves/${encodeURIComponent(id)}`),
   },
   rosters: {
@@ -435,9 +501,11 @@ export const api = {
     remove: (id: string) => deleteJson(`/api/v1/rosters/${encodeURIComponent(id)}`),
   },
   bases: {
-    create: (base: unknown, name?: string) => sendJson<DocumentMeta>("POST", "/api/v1/bases", { name, base }),
+    create: (base: BaseConfig, name?: string) => sendJson<DocumentMeta>("POST", "/api/v1/bases", { name, base }),
+    update: (id: string, base: BaseConfig, name?: string) =>
+      sendJson<DocumentMeta>("PUT", `/api/v1/bases/${encodeURIComponent(id)}`, { name, base }),
     list: () => getJson<DocumentMeta[]>("/api/v1/bases"),
-    get: (id: string) => getJson<DocumentMeta & { base: unknown }>(`/api/v1/bases/${encodeURIComponent(id)}`),
+    get: (id: string) => getJson<DocumentMeta & { base: BaseConfig }>(`/api/v1/bases/${encodeURIComponent(id)}`),
     remove: (id: string) => deleteJson(`/api/v1/bases/${encodeURIComponent(id)}`),
   },
 };
