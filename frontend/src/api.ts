@@ -385,7 +385,7 @@ export type ImportWarning =
 /** What reading another tool's export did. */
 export interface ImportReport {
   source: "krooster" | "ak-planner";
-  format: "krooster_v3" | "krooster_v3_rows" | "krooster_legacy" | "ak_planner_export";
+  format: "krooster_profile" | "krooster_v3" | "krooster_v3_rows" | "krooster_legacy" | "ak_planner_export";
   entries: number;
   imported: number;
   not_owned: number;
@@ -499,6 +499,14 @@ export const api = {
     list: () => getJson<DocumentMeta[]>("/api/v1/rosters"),
     get: (id: string) => getJson<DocumentMeta & RosterView>(`/api/v1/rosters/${encodeURIComponent(id)}`),
     remove: (id: string) => deleteJson(`/api/v1/rosters/${encodeURIComponent(id)}`),
+  },
+  krooster: {
+    /**
+     * The roster in a Krooster user's public profile, `{ data: { roster } }`,
+     * fetched by the server (Krooster sends no CORS headers). Store it as a
+     * `krooster` roster.
+     */
+    roster: (username: string) => getJson<unknown>(`/api/v1/import/krooster/${encodeURIComponent(username)}`),
   },
   bases: {
     create: (base: BaseConfig, name?: string) => sendJson<DocumentMeta>("POST", "/api/v1/bases", { name, base }),

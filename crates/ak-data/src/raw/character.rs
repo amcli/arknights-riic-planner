@@ -35,7 +35,7 @@ pub struct RawCharacter {
     pub profession: String,
     pub sub_profession_id: String,
     /// One entry per promotion the character can reach.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::list")]
     pub phases: Vec<RawPhase>,
 }
 

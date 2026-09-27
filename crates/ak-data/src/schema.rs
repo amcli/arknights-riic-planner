@@ -162,7 +162,7 @@ pub const BUILDING_KNOWN_KEYS: &[&str] = &[
     "emojis",
     "categoryNames",
     "buffSortData",
-    // Present in zh_CN as of 2026-09 but not in the archived en_US snapshot.
+    // Present in zh_CN as of 2026-09 but not yet in the en data.
     "meetingMessageBoardEmoteTime",
     "tradingRoomInfoData",
 ];

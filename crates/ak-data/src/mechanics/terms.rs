@@ -39,7 +39,13 @@ pub fn classify(id: &str) -> Term {
     match id {
         // Nations / groups / teams (mapped to handbook_team_table ids).
         "cc.g.bs" => power("blacksteel"),
-        "cc.g.karlan" => power("karlan"),
+        // Kjerag the nation, not the Karlan Trade group: the CN text is
+        // 谢拉格 (Kjerag), and Global's old "Karlan Trade" was a
+        // mistranslation, corrected to "Kjerag" by 2026-09.
+        "cc.g.karlan" => power("kjerag"),
+        "cc.g.minos" => power("minos"),
+        "cc.g.sargon" => power("sargon"),
+        "cc.g.elite" => power("elite"),
         "cc.g.lda" => power("lee"),
         "cc.g.lgd" => power("lgd"),
         "cc.g.ussg" => power("student"),
@@ -73,6 +79,7 @@ pub fn classify(id: &str) -> Term {
         "cc.bd_ash" => res("intelligence_reserve"),
         "cc.bd_tachanka" => res("ursus_specialty_beverage"),
         "cc.bd_dungeon" => res("monster_meal"),
+        "cc.bd_mujica" => res("passion"),
         "cc.bd_a1_a1" => res("memory_fragments"),
         "cc.bd_a1_a2" => res("dreamland"),
         "cc.bd_a1_a3" => res("measure"),
@@ -172,6 +179,12 @@ mod tests {
         );
         assert_eq!(classify("cc.t.flow_gold"), Term::GoldLines);
         assert_eq!(classify("cc.nope"), Term::Unknown);
+        // The nation, whatever the English text of the day calls it.
+        assert_eq!(
+            classify("cc.g.karlan"),
+            Term::Group(Group::Power(PowerId::new("kjerag")))
+        );
+        assert_eq!(classify("cc.bd_mujica"), Term::Resource("passion".into()));
     }
 
     #[test]

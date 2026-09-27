@@ -831,6 +831,81 @@ fn every_other_rhine_lab_operator_excludes_the_owner() {
     approx(total, flat + per_count_value(skill) * 2.0, 1e-9);
 }
 
+#[test]
+fn a_trading_post_needs_three_kjerag_operators_for_the_bonus() {
+    // "All Trading Posts with 3 Kjerag Operators assigned gain order
+    // acquisition efficiency +10%". Kjerag is the nation (the CN text of
+    // `cc.g.karlan` is 谢拉格), so members outside the Karlan Trade group
+    // count; only those are used here, so a wrong mapping shows.
+    let (owner, skill) = holder_of("control_tra_limit&spd3");
+    let has = |o: &Operator, p: &str| o.powers().any(|x| x.as_str() == p);
+    let kjerag: Vec<OperatorId> = data()
+        .operators
+        .values()
+        .filter(|o| o.id != owner && has(o, "kjerag") && !has(o, "karlan"))
+        .map(|o| o.id.clone())
+        .take(5)
+        .collect();
+    assert_eq!(kjerag.len(), 5);
+    let b = base(vec![
+        Room::new("t1", RoomType::Trading, 3),
+        Room::new("t2", RoomType::Trading, 3),
+    ]);
+    let a = assign(
+        &b,
+        &[
+            ("cc", std::slice::from_ref(&owner)),
+            ("t1", &kjerag[..3]),
+            ("t2", &kjerag[3..]),
+        ],
+    );
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    let bonus = |room: &str| -> f64 {
+        snap.contributions
+            .iter()
+            .filter(|c| c.room.as_str() == room && c.skill == skill.id)
+            .map(|c| c.value)
+            .sum()
+    };
+    approx(bonus("t1"), per_count_value(skill), 1e-9);
+    approx(bonus("t2"), 0.0, 1e-9);
+}
+
+#[test]
+fn every_operator_in_the_factory_adds_capacity_including_the_owner() {
+    // "… but every Operator in that Factory increases that Factory's
+    // Capacity limit by +5": three Operators, three times the amount.
+    let (owner, skill) = holder_of("manu_prod_spd&manu");
+    let per = skill
+        .mechanics
+        .as_ref()
+        .unwrap()
+        .clauses
+        .iter()
+        .find_map(|c| match &c.effect {
+            Effect::Capacity {
+                amount: Amount::PerCount { per, .. },
+                ..
+            } => Some(*per),
+            _ => None,
+        })
+        .unwrap();
+    let pool = without_skills_for_excluding(RoomType::Manufacture, 2, std::slice::from_ref(&owner));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[owner, pool[0].clone(), pool[1].clone()])]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    let added: f64 = snap
+        .contributions
+        .iter()
+        .filter(|c| c.skill == skill.id && c.stat == StatKind::Capacity)
+        .map(|c| c.value)
+        .sum();
+    approx(added, 3.0 * per, 1e-9);
+    let f1 = snap.rooms.iter().find(|r| r.id.as_str() == "f1").unwrap();
+    let level_3 = f64::from(data().constants.manufacture.phases[2].output_capacity);
+    approx(f1.capacity, level_3 + 3.0 * per, 1e-9);
+}
+
 // ---- Base validation and Factory inputs ---------------------------------
 
 #[test]

@@ -112,6 +112,37 @@ fn krooster_current_roster() {
 }
 
 #[test]
+fn krooster_public_profile() {
+    let r = run(Source::Krooster, "krooster-profile.json");
+    assert_eq!(r.report.source, Source::Krooster);
+    assert_eq!(r.report.format, Format::KroosterProfile);
+    // Krooster keeps no row at potential 0, so every entry is owned.
+    assert_eq!(r.report.entries, 11);
+    assert_eq!(r.report.not_owned, 0);
+    assert_eq!(r.report.imported, 10);
+    // The profile's roster is the local storage shape, and reads the same;
+    // its account details and supports are read past.
+    let keyed = run(Source::Krooster, "krooster-v3.json");
+    assert_eq!(r.roster, keyed.roster);
+    assert_eq!(r.report.warnings, keyed.report.warnings);
+}
+
+#[test]
+fn a_profile_keeps_its_roster_under_data() {
+    for input in [
+        json!({ "data": {} }),
+        json!({ "data": { "roster": [] } }),
+        json!({ "data": "User not found" }),
+    ] {
+        let err = import::import(Source::Krooster, data(), &input).unwrap_err();
+        assert!(
+            matches!(&err, ImportError::NotThisFormat { tool: Source::Krooster, reason } if reason.contains("`data.roster`")),
+            "{input}: {err}"
+        );
+    }
+}
+
+#[test]
 fn imported_promotions_pick_the_skill_tiers() {
     let r = run(Source::Krooster, "krooster-v3.json");
     let active = |id: &str| -> Vec<String> {
@@ -199,6 +230,11 @@ fn an_empty_roster_is_fine() {
     let r = import::import(Source::Krooster, data(), &json!({})).unwrap();
     assert_eq!(r.report.format, Format::KroosterV3);
     assert!(r.roster.entries.is_empty());
+    // A new Krooster account.
+    let profile = json!({ "data": { "account": {}, "supports": [], "roster": {} } });
+    let r = import::import(Source::Krooster, data(), &profile).unwrap();
+    assert_eq!(r.report.format, Format::KroosterProfile);
+    assert!(r.roster.entries.is_empty());
     let r = import::import(
         Source::AkPlanner,
         data(),
@@ -257,6 +293,14 @@ fn malformed_entries_are_refused_by_name() {
     let mut v3 = fixture("krooster-v3.json");
     v3["char_102_texas"]["level"] = json!(60.0);
     assert!(import::import(Source::Krooster, data(), &v3).is_ok());
+
+    let mut profile = fixture("krooster-profile.json");
+    profile["data"]["roster"]["char_102_texas"]["elite"] = json!("two");
+    let err = import::import(Source::Krooster, data(), &profile).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "char_102_texas: `elite` must be a whole number, found \"two\""
+    );
 
     let mut rows = fixture("krooster-v3-rows.json");
     rows[1]["op_id"] = json!(7);

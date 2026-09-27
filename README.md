@@ -9,30 +9,31 @@ design; this README tracks what actually exists.
 | Layer | Crate | State |
 | --- | --- | --- |
 | 1. Data ingestion | `ak-data`, `ak-data-sync` | **Done.** Pinned upstream snapshot, schema drift check, strict two-stage transform. |
-| 2. Skill DSL | `ak-data::mechanics` | **Done to 92% / 100%.** Description parser → typed `Mechanics` AST. 589 of 640 tiers fully modelled, 51 partial with named gaps, 0 rejected. |
+| 2. Skill DSL | `ak-data::mechanics` | **Done to 92% / 100%.** Description parser → typed `Mechanics` AST. 659 of 715 tiers fully modelled, 56 partial with named gaps, 0 rejected. |
 | 3. Domain model | `ak-domain` | **Done.** `BaseConfig` (validated against room limits, layout slots and power), `Assignment` (checked mutators, so it cannot hold an impossible state), `Roster`. |
 | 4. Evaluator / mood sim | `ak-eval` | **Done for production and morale.** Instantaneous evaluator plus a deterministic fixed-tick simulator with rotation, collection and a shared depot. Clue output and resource accumulators are not simulated yet. |
 | 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
 | 6. Persistence | `ak-store` | **Done, file-backed.** Versioned JSON documents for rosters, bases and solve jobs, migrated on read. The Postgres backend the plan calls for waits for a database; the trait is in place. |
 | 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. JSON errors throughout, work limits, gzip, opt-in CORS. |
-| 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (current, row and legacy shapes) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
+| 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (public profile, current, row and legacy shapes; the API fetches a profile by username) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
 | 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines. |
 
-**Ingestion coverage (pinned en_US snapshot):** 374 / 374 operators with
-base skills, 640 / 640 skill tiers, 0 skipped under strict mode.
+**Ingestion coverage (pinned en_US snapshot):** 410 / 410 operators with
+base skills, 715 / 715 skill tiers, 0 skipped under strict mode.
 
 **Parser coverage (same snapshot):**
 
 | Outcome | Tiers | Meaning |
 | --- | --- | --- |
-| Fully modelled | 589 (92.0%) | Every predicate, counter and effect is a typed AST node the evaluator can act on. |
-| Partial | 51 (8.0%) | Parsed, but at least one part is an explicit `Unmodeled` node (e.g. "chance of higher-yield gold orders is increased"). The quantified parts are still usable. |
-| Rejected | 0 | The parser could not read the description at all. |
+| Fully modelled | 659 (92.2%) | Every predicate, counter and effect is a typed AST node the evaluator can act on. |
+| Partial | 56 (7.8%) | Parsed, but at least one part is an explicit `Unmodeled` node (e.g. "chance of higher-yield gold orders is increased"). The quantified parts are still usable. |
+| Rejected | 0 | The parser could not read the description at all; the evaluator would report the skill and apply nothing. |
 
 Every parsed magnitude that upstream also exposes through its display-only
 `efficiency` sort hint agrees with that hint (over 200 tiers cross-checked
 in `crates/ak-data/tests/mechanics.rs`). The coverage numbers are a test
-ratchet: they may only go up.
+ratchet: they may only go up, except when a new pin brings tiers the rules
+do not know yet, and then the test says which.
 
 ## How Layer 2 works
 
@@ -44,7 +45,9 @@ rule per sentence:
 
 1. **Templatize** the rich text: `<@cc.vup>+15%</>` → `{V:+15%}`, keywords
    → `{K:Guard}`, glossary terms → `{T:cc.g.bs}` (term ids are stable across
-   locales; their display text is not).
+   locales; their display text is not: `cc.g.karlan` read "Karlan Trade" on
+   Global until 2026, but its CN text, 谢拉格, shows it means the Kjerag
+   nation, so that is what it maps to).
 2. **Prefix**: strip "When this Operator is assigned to …", harvesting any
    condition it carries ("to the same Trading Post as Texas") or the Workshop
    material filter.
@@ -284,6 +287,15 @@ adapters; the stored document keeps the canonical roster, its source and
 the import report, and `POST /api/v1/rosters/preview` shows what an import
 would store without storing it.
 
+**Krooster by username.** `GET /api/v1/import/krooster/{username}` fetches
+a user's public Krooster profile and answers with its roster alone,
+`{ data: { roster } }`, ready to store with source `krooster`; the account
+details and supports are dropped on arrival. The server fetches it because
+Krooster sends no CORS headers, so the browser cannot. It is the only route
+that reaches outside the server: the username must be one Krooster allows
+(at most 32 letters, digits, `_` or `-`), the fetch gives up after 15
+seconds, an unknown user is a `404`, and a Krooster failure is a `502`.
+
 **Solves** are a queue. `POST /api/v1/solves` validates the request the way
 the solver would, stores it as `pending` and answers `202`. At most
 `--max-running-solves` run at once (half the cores by default); each runs on
@@ -335,11 +347,12 @@ name.
 
 | Source | How to get the file | What is read |
 | --- | --- | --- |
-| `krooster` | Krooster has no export button. On krooster.com, open the browser console and run `copy(localStorage.getItem("v3_roster"))`, then paste into a file. | Current shape: `{ id: { op_id, elite, level, potential, … } }`; also accepted as a list of rows (its database table) and in its older `{ id: { id, promotion, owned, level, … } }` shape. |
+| `krooster` | Krooster has no export button, but profiles are public. Fetch one by username (the end of the profile link in Krooster's Settings, `krooster.com/u/…`) from the Rosters screen or `GET /api/v1/import/krooster/{username}`, or save the page `https://www.krooster.com/api/u/{username}`. Last resort, in a browser logged in to Krooster: open Data → Collection, then run `copy(localStorage.getItem("v3_roster"))` in the console (Chrome asks you to type `allow pasting` first). | Profile: `{ data: { account, supports, roster } }`, of which only `roster` is read, in the current shape: `{ id: { op_id, elite, level, potential, … } }`. The current shape is also accepted bare (`v3_roster`), as a list of rows (its database table), and in its older `{ id: { id, promotion, owned, level, … } }` shape. |
 | `ak-planner` | [GoodEffort/Arknights-Planner](https://goodeffort.github.io/Arknights-Planner/): "Import/Export" at the top right, copy the text. | `{ s, i, p }`: each saved plan's `operatorId`, `plans.currentElite` and `plans.currentLevel`, in its current and older shapes. |
 
 The formats come from each tool's source code (`neeia/ak-roster`:
-`src/types/operators/operator.ts`, `src/util/hooks/useOperators.ts`;
+`src/types/operators/operator.ts`, `src/util/hooks/useOperators.ts`,
+`src/pages/api/u/[user].tsx`;
 `GoodEffort/Arknights-Planner`: `src/store/store-operator-functions.ts`,
 `src/types/plans.ts`), and the fixtures in
 `crates/ak-data/tests/fixtures/import/` follow them rather than real
@@ -387,9 +400,10 @@ cargo run -p ak-cli -- import ak-planner plan.json --out roster.json  # write th
 The frontend (`frontend/`, Vite + React + TypeScript, no router or chart
 library) has one screen per step, switched by the URL hash:
 
-- **Rosters** (`#/rosters`): paste or open another tool's export (or the
-  canonical JSON), preview what it reads as, with every warning named, and
-  save it. Stored rosters list their operators and import report.
+- **Rosters** (`#/rosters`): fetch a Krooster roster by username, or paste
+  or open another tool's export (or the canonical JSON), preview what it
+  reads as, with every warning named, and save it. Stored rosters list their
+  operators and import report.
 - **Base** (`#/base`): rooms with their level, Factory formula, Trading Post
   orders, Dormitory ambience and Training Room job; running totals of power
   and of production, dormitory and function slots, from the same data the
@@ -456,17 +470,23 @@ dependency.
 
 ## Upstream data
 
-Source: [Kengxxiao/ArknightsGameData_YoStar](https://github.com/Kengxxiao/ArknightsGameData_YoStar),
-`en_US`, commit `57010cb5b2af` (2025-11-13, client 31.5.80). That repository
-was archived on that date, so this is the final Global snapshot from it; the
-CN repository is still live and is listed (disabled) in the manifest with an
-identical schema. Operators released to Global after November 2025 are absent
-until a successor EN source is chosen. Note that the Layer 2 parser is
-written against English descriptions; a CN source would need a second rule
-table (term ids and values are shared, prose is not).
+Source: [ArknightsAssets/ArknightsGamedata](https://github.com/ArknightsAssets/ArknightsGamedata),
+`en`, commit `09df1ef62bb5` (the EN update of 2026-09-23, resource version
+`26-09-18-15-44-33_adcee5`). It extracts the data from the game's servers
+with [arkprts](https://github.com/thesadru/arkprts) in GitHub Actions and is
+the source Krooster uses for Global. It writes an empty list as `{}` rather
+than `[]`; the raw mirrors accept both.
+
+The previous source, [Kengxxiao/ArknightsGameData_YoStar](https://github.com/Kengxxiao/ArknightsGameData_YoStar),
+was archived on 2025-11-13 (client 31.5.80), so operators released to Global
+after that (Haruka, Hoshiguma the Breacher, the Ave Mujica collab, …) were
+missing and imports skipped them. The CN repository is still live and is
+listed (disabled) in the manifest with the same schema. Note that the Layer 2
+parser is written against English descriptions; a CN source would need a
+second rule table (term ids and values are shared, prose is not).
 
 Files ingested: `building_data.json`, `character_table.json`,
-`handbook_team_table.json` (~16 MB, committed).
+`handbook_team_table.json` (~25 MB, committed).
 
 ### Bumping the pin
 
@@ -515,6 +535,7 @@ API endpoints:
 - `POST /api/v1/simulate` — request → totals, per-room and per-operator reports, morale trajectory, events, warnings
 - `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, source?, roster }`, where `source` is `manual` (default), `krooster` or `ak-planner`; answers with the import report
 - `POST /api/v1/rosters/preview` — same body; the roster and import report, not stored
+- `GET /api/v1/import/krooster/{username}` — the roster in a Krooster user's public profile, `{ data: { roster } }`, to store with source `krooster`
 - `POST /api/v1/bases`, `GET /api/v1/bases`, `GET|PUT|DELETE /api/v1/bases/{id}` — body `{ name?, base }`, validated
 - `POST /api/v1/solves` — body `{ name?, request }`, answers `202` with the job; `GET /api/v1/solves` lists jobs with status
 - `GET /api/v1/solves/{id}` — status, the request as it ran, `progress` while running, the result or error once finished

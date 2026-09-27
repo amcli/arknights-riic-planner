@@ -18,6 +18,8 @@
 //! GET    /api/v1/rosters/{id}              the roster and its source
 //! PUT    /api/v1/rosters/{id}              replace
 //! DELETE /api/v1/rosters/{id}
+//! GET    /api/v1/import/krooster/{username}
+//!                                          a Krooster user's roster, from their public profile
 //! POST   /api/v1/bases                     { name?, base } → 201 + metadata
 //! GET    /api/v1/bases                     listing
 //! GET    /api/v1/bases/{id}                the base
@@ -34,8 +36,10 @@
 //!
 //! Requests to evaluate, simulate or solve may name a stored base or
 //! roster as `base_id` / `roster_id` instead of including it ([`refs`]).
-//! Solves run in the background, a few at a time ([`jobs`]). Every error is
-//! JSON: `{ "error": message }` ([`error`]).
+//! Solves run in the background, a few at a time ([`jobs`]). A roster can
+//! be fetched from Krooster by username ([`krooster`]), the one route that
+//! reaches outside the server. Every error is JSON: `{ "error": message }`
+//! ([`error`]).
 //!
 //! The binary (`src/main.rs`) loads the game data, opens the store and
 //! serves [`router`]; tests drive the same router in-process.
@@ -46,6 +50,7 @@ pub mod bases;
 pub mod error;
 pub mod gamedata;
 pub mod jobs;
+pub mod krooster;
 pub mod refs;
 pub mod rosters;
 pub mod simulation;
@@ -118,6 +123,8 @@ pub struct AppState {
     pub limits: Arc<Limits>,
     /// Queued and running solves.
     pub jobs: Arc<Jobs>,
+    /// Where rosters are fetched from by Krooster username.
+    pub krooster: Arc<krooster::Krooster>,
 }
 
 impl AppState {
@@ -138,6 +145,7 @@ impl AppState {
             store,
             limits: Arc::new(limits),
             jobs,
+            krooster: Arc::new(krooster::Krooster::default()),
         }
     }
 }
@@ -169,6 +177,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/rosters/{id}",
             get(rosters::get).put(rosters::put).delete(rosters::delete),
         )
+        .route("/api/v1/import/krooster/{username}", get(krooster::roster))
         .route("/api/v1/bases", get(bases::list).post(bases::create))
         .route(
             "/api/v1/bases/{id}",

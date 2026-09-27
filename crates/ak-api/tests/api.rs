@@ -1,8 +1,10 @@
 //! Layer 7 tests: the router driven in-process against the pinned snapshot
 //! and a temporary store.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -13,6 +15,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use ak_api::jobs::{JobStatus, SolveJob};
+use ak_api::krooster::Krooster;
 use ak_api::refs::Refs;
 use ak_api::{AppState, Limits};
 use ak_data::{Strictness, load_default};
@@ -96,6 +99,13 @@ impl Harness {
             dir,
             cleanup: true,
         }
+    }
+
+    /// Fetches Krooster rosters from `base` instead of Krooster itself.
+    fn with_krooster(mut self, base: &str) -> Self {
+        self.state.krooster = Arc::new(Krooster::at(base));
+        self.app = ak_api::router(self.state.clone());
+        self
     }
 
     async fn raw(&self, method: Method, uri: &str, body: Option<&str>) -> Response<Body> {
@@ -233,7 +243,10 @@ async fn game_data_endpoints() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["sha"], data.version.sha.as_str());
     assert_eq!(v["stats"]["operators"], data.operators.len());
-    assert_eq!(v["stats"]["mechanics_unparsed"], 0);
+    assert_eq!(
+        v["stats"]["mechanics_unparsed"],
+        ak_data::stats::compute(&data).mechanics_unparsed
+    );
     assert_eq!(v["operators_skipped"], 0);
 
     let (status, ops) = h.get("/api/v1/gamedata/operators").await;
@@ -847,6 +860,127 @@ async fn rosters_import_from_other_tools() {
     assert_eq!(job["result"]["space"]["pool"], 10);
     let best = &job["result"]["candidates"][0];
     assert!(best["score"].as_f64().unwrap() > 0.0, "{}", best["score"]);
+}
+
+/// A stand-in for Krooster's profile route on a local port, and the paths
+/// it has been asked for. `/api/u/example-doctor` answers the profile
+/// fixture, `/api/u/garbled` a web page, `/api/u/down` a server error, and
+/// any other user Krooster's `404`.
+fn fake_krooster() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let profile = export("krooster-profile.json").to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = Vec::new();
+            let mut buf = [0; 1024];
+            while !head.ends_with(b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&head);
+            let path = head
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            let (status, kind, body) = match path.as_str() {
+                "/api/u/example-doctor" => ("200 OK", "application/json", profile.as_str()),
+                "/api/u/garbled" => ("200 OK", "text/html", "<!DOCTYPE html><p>Krooster</p>"),
+                "/api/u/down" => (
+                    "500 Internal Server Error",
+                    "text/plain",
+                    "Internal server error.",
+                ),
+                _ => ("404 Not Found", "text/plain", "User not found"),
+            };
+            log.lock().unwrap().push(path);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (base, asked)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rosters_fetched_from_krooster() {
+    let (krooster, asked) = fake_krooster();
+    let h = Harness::new(Limits::default()).with_krooster(&krooster);
+
+    // The profile's roster, without the account details and supports.
+    let (status, fetched) = h.get("/api/v1/import/krooster/Example-Doctor").await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    let profile = export("krooster-profile.json");
+    assert_eq!(
+        fetched,
+        json!({ "data": { "roster": profile["data"]["roster"] } })
+    );
+    // Krooster looks usernames up in lower case.
+    assert_eq!(*asked.lock().unwrap(), ["/api/u/example-doctor"]);
+
+    // It stores like any Krooster roster, read as a profile.
+    let (status, saved) = h
+        .post(
+            "/api/v1/rosters",
+            json!({ "name": "example-doctor", "source": "krooster", "roster": fetched }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(saved["import"]["format"], "krooster_profile");
+    assert_eq!(saved["import"]["imported"], 10);
+
+    // What went wrong is told apart.
+    let (status, err) = h.get("/api/v1/import/krooster/nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_of(&err), "no Krooster user named \"nobody\"");
+    let (status, err) = h.get("/api/v1/import/krooster/down").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        error_of(&err),
+        "Krooster answered 500 when asked for \"down\""
+    );
+    let (status, err) = h.get("/api/v1/import/krooster/garbled").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        error_of(&err),
+        "Krooster's answer for \"garbled\" is not a Krooster profile"
+    );
+
+    // A name Krooster could not have is refused without asking it, so it
+    // cannot steer the request anywhere else.
+    let before = asked.lock().unwrap().len();
+    let long = "x".repeat(33);
+    for bad in ["no.dots", "a%2Fb", "..%2F..%2Fapi", "%20", long.as_str()] {
+        let (status, err) = h.get(&format!("/api/v1/import/krooster/{bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {err}");
+        assert!(error_of(&err).contains("not a Krooster username"), "{err}");
+    }
+    assert_eq!(asked.lock().unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn an_unreachable_krooster_is_a_bad_gateway() {
+    // A port nothing listens on any more.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let h = Harness::new(Limits::default()).with_krooster(&format!("http://127.0.0.1:{port}"));
+    let (status, err) = h.get("/api/v1/import/krooster/example-doctor").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        error_of(&err).starts_with("could not reach Krooster"),
+        "{err}"
+    );
 }
 
 // ---- frontend support ------------------------------------------------------
