@@ -10,7 +10,7 @@ use ak_data::manifest::{BUILDING_FILE, CHARACTER_FILE, TEAM_FILE};
 use ak_data::{Loaded, Strictness, load_default, schema, stats};
 use ak_domain::*;
 
-const PINNED_SHA: &str = "57010cb5b2afea112cae57daa756b58676ba6850";
+const PINNED_SHA: &str = "09df1ef62bb5e1ea3e22549a5b280c7083c85de4";
 
 fn loaded() -> &'static Loaded {
     static LOADED: OnceLock<Loaded> = OnceLock::new();
@@ -26,14 +26,31 @@ fn data() -> &'static GameData {
 #[test]
 fn pinned_snapshot_counts() {
     let d = data();
-    assert_eq!(d.operators.len(), 374);
-    assert_eq!(d.skills.len(), 640);
-    assert_eq!(d.powers.len(), 45);
+    assert_eq!(d.operators.len(), 410);
+    assert_eq!(d.skills.len(), 715);
+    assert_eq!(d.powers.len(), 46);
     assert_eq!(d.facilities.len(), 12);
     assert_eq!(d.manufacture_formulas.len(), 14);
     assert_eq!(d.layout.slots.len(), 51);
     assert!(loaded().report.skipped.is_empty());
-    assert_eq!(loaded().report.operators_loaded, 374);
+    assert_eq!(loaded().report.operators_loaded, 410);
+}
+
+#[test]
+fn operators_released_on_global_after_the_old_snapshot_are_in() {
+    // The previous source froze at 2025-11-13; these came to Global later.
+    for (id, name) in [
+        ("char_4202_haruka", "Haruka"),
+        ("char_1044_hsgma2", "Hoshiguma the Breacher"),
+        ("char_2027_wang", "Wang"),
+        ("char_4182_oblvns", "Sakiko Togawa"),
+    ] {
+        let op = data().operator(id).unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(op.name, name);
+        assert_eq!(op.skill_slots.len(), 2, "{id}");
+    }
+    // Amiya's alternate forms have no entry of their own: they use Amiya's.
+    assert!(data().operator("char_1001_amiya2").is_none());
 }
 
 #[test]
@@ -41,11 +58,11 @@ fn version_matches_manifest_pin() {
     let v = &data().version;
     assert_eq!(v.sha, PINNED_SHA);
     assert_eq!(v.source, "en_US");
-    assert_eq!(v.locale, "en_US");
-    assert_eq!(v.repo, "Kengxxiao/ArknightsGameData_YoStar");
+    assert_eq!(v.locale, "en");
+    assert_eq!(v.repo, "ArknightsAssets/ArknightsGamedata");
     assert!(v.fetched_at.is_some(), "sidecar should record fetched_at");
     assert_eq!(v.parser_version, ak_data::PARSER_VERSION);
-    assert_eq!(v.short_sha(), "57010cb5b2af");
+    assert_eq!(v.short_sha(), "09df1ef62bb5");
 }
 
 #[test]
@@ -260,11 +277,11 @@ fn schema_check_passes_on_pinned_snapshot() {
 #[test]
 fn stats_summary() {
     let s = stats::compute(data());
-    assert_eq!(s.operators, 374);
-    assert_eq!(s.skill_tiers, 640);
-    assert_eq!(s.skill_tiers_by_room[&RoomType::Manufacture], 99);
-    assert_eq!(s.skill_tiers_by_room[&RoomType::Trading], 82);
-    assert_eq!(s.operators_by_rarity.values().sum::<usize>(), 374);
+    assert_eq!(s.operators, 410);
+    assert_eq!(s.skill_tiers, 715);
+    assert_eq!(s.skill_tiers_by_room[&RoomType::Manufacture], 107);
+    assert_eq!(s.skill_tiers_by_room[&RoomType::Trading], 90);
+    assert_eq!(s.operators_by_rarity.values().sum::<usize>(), 410);
     assert!(s.skill_families > 100);
 }
 

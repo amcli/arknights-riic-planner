@@ -1,20 +1,20 @@
 {
-  "repo": "Kengxxiao/ArknightsGameData_YoStar",
-  "sha": "57010cb5b2afea112cae57daa756b58676ba6850",
-  "locale": "en_US",
-  "fetched_at": "2026-09-21T03:07:51Z",
+  "repo": "ArknightsAssets/ArknightsGamedata",
+  "sha": "09df1ef62bb5e1ea3e22549a5b280c7083c85de4",
+  "locale": "en",
+  "fetched_at": "2026-09-27T21:15:51Z",
   "files": {
     "building_data.json": {
-      "sha256": "4ca8eeb5e8274c2f460f34227f325dc9093bf577d6519ab5b57025c4815d023c",
-      "bytes": 4381398
+      "sha256": "032431642367f3f6843c799ef42f9374f306016dcaa0becc3ce1d3dd86157955",
+      "bytes": 6278411
     },
     "character_table.json": {
-      "sha256": "cf86d1690bdae2bf02378081ef8ae61731da042902bb284d339b7c0d889e66a9",
-      "bytes": 11459107
+      "sha256": "7f683026434d56c9ea5be8afd160dfc8110bcbc60fcfee41a676816fafbdfc0e",
+      "bytes": 19283062
     },
     "handbook_team_table.json": {
-      "sha256": "737f215c86725388e967c1a863b9679566fa419588809869475f1a99c03820ea",
-      "bytes": 9606
+      "sha256": "528871d2badd9e8fed6732b81bdeb4c5e34cfbcbed2d972d937c755eb3726dee",
+      "bytes": 11476
     }
   }
 }

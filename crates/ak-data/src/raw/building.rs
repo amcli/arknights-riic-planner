@@ -18,7 +18,9 @@ pub struct RawBuildingData {
     pub manpower_display_factor: u32,
     pub basic_favor_per_day: u32,
     pub tired_ap_threshold: u32,
+    #[serde(deserialize_with = "super::list")]
     pub manufact_manpower_cost_by_num: Vec<i32>,
+    #[serde(deserialize_with = "super::list")]
     pub trading_manpower_cost_by_num: Vec<i32>,
     pub rooms: BTreeMap<String, RawRoom>,
     pub layouts: BTreeMap<String, RawLayout>,
@@ -62,6 +64,7 @@ pub struct RawRoom {
     pub max_count: i32,
     pub category: String,
     pub size: RawGridSize,
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawRoomPhase>,
 }
 
@@ -112,6 +115,7 @@ pub struct RawControlData {
 #[serde(rename_all = "camelCase")]
 pub struct RawManufactData {
     pub basic_speed_buff: f64,
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawManufactPhase>,
 }
 
@@ -125,6 +129,7 @@ pub struct RawManufactPhase {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawDormData {
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawDormPhase>,
 }
 
@@ -139,6 +144,7 @@ pub struct RawDormPhase {
 #[serde(rename_all = "camelCase")]
 pub struct RawTradingData {
     pub basic_speed_buff: f64,
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawTradingPhase>,
 }
 
@@ -160,6 +166,7 @@ pub struct RawPowerData {
 #[serde(rename_all = "camelCase")]
 pub struct RawMeetingData {
     pub basic_speed_buff: f64,
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawMeetingPhase>,
 }
 
@@ -175,6 +182,7 @@ pub struct RawMeetingPhase {
 #[serde(rename_all = "camelCase")]
 pub struct RawHireData {
     pub basic_speed_buff: f64,
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawHirePhase>,
 }
 
@@ -190,6 +198,7 @@ pub struct RawHirePhase {
 #[serde(rename_all = "camelCase")]
 pub struct RawTrainingData {
     pub basic_speed_buff: f64,
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawTrainingPhase>,
 }
 
@@ -202,6 +211,7 @@ pub struct RawTrainingPhase {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawWorkshopData {
+    #[serde(deserialize_with = "super::list")]
     pub phases: Vec<RawWorkshopPhase>,
 }
 
@@ -217,12 +227,14 @@ pub struct RawWorkshopPhase {
 pub struct RawBuildingChar {
     pub char_id: String,
     pub max_manpower: u64,
+    #[serde(deserialize_with = "super::list")]
     pub buff_char: Vec<RawBuffCharSlot>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawBuffCharSlot {
+    #[serde(deserialize_with = "super::list")]
     pub buff_data: Vec<RawBuffData>,
 }
 
@@ -254,7 +266,7 @@ pub struct RawBuff {
     pub description: String,
     pub efficiency: i32,
     pub target_group_sort_id: i32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::list")]
     pub targets: Vec<String>,
 }
 
@@ -267,9 +279,9 @@ pub struct RawManufactFormula {
     pub weight: u32,
     pub cost_point: u32,
     pub formula_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::list")]
     pub costs: Vec<RawItemCost>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::list")]
     pub require_rooms: Vec<RawRoomRequirement>,
 }
 

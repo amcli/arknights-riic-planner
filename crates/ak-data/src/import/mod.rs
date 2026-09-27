@@ -4,7 +4,8 @@
 //! Each adapter reads one tool's format and nothing else, so a change to
 //! one tool's export breaks one adapter only:
 //!
-//! - [`krooster`]: Krooster's roster, current and legacy shapes;
+//! - [`krooster`]: Krooster's roster, current and legacy shapes, and its
+//!   public profile;
 //! - [`ak_planner`]: ak-planner's (GoodEffort/Arknights-Planner) export.
 //!
 //! The adapters share the checks in `Builder`: an operator the pinned game
@@ -78,6 +79,9 @@ impl std::str::FromStr for Source {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
+    /// Krooster's public profile (`/api/u/{username}`): the current roster
+    /// under `data.roster`.
+    KroosterProfile,
     /// Krooster's current roster (localStorage `v3_roster`): operators keyed
     /// by id.
     KroosterV3,

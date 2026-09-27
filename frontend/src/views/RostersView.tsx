@@ -20,7 +20,7 @@ const SOURCES: { id: RosterSource; label: string; help: string }[] = [
   {
     id: "krooster",
     label: "Krooster",
-    help: "Krooster has no export button. On krooster.com, open the browser console (F12) and run copy(localStorage.getItem(\"v3_roster\")), then paste here. Its older roster format and its database rows are read too.",
+    help: "Enter your Krooster username to fetch your roster from your public Krooster profile. Your username ends your profile link in Krooster's Settings (krooster.com/u/…). You can also paste the page at www.krooster.com/api/u/<username> below, or an older Krooster export.",
   },
   {
     id: "ak-planner",
@@ -44,7 +44,7 @@ function parsePasted(text: string): unknown {
 export function describeWarning(w: ImportWarning, name: (id: string) => string): string {
   switch (w.kind) {
     case "unknown_operator":
-      return `${w.operator}: not in the game data (released later, CN-only, or an alternate form); skipped`;
+      return `${w.operator}: not in the game data (released since it was last updated, CN-only, or an alternate form like Amiya's); skipped`;
     case "promotion_clamped":
       return `${name(w.operator)}: Elite ${w.found} is beyond its rarity; taken as ${w.used.replace("PHASE_", "Elite ")} level ${w.level}`;
     case "level_clamped":
@@ -93,6 +93,7 @@ function ReportView({ report, name }: { report: ImportReport; name: (id: string)
 function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
   const { name } = useGameData();
   const [source, setSource] = useState<RosterSource>("krooster");
+  const [username, setUsername] = useState(() => recall("krooster-user") ?? "");
   const [text, setText] = useState("");
   const [label, setLabel] = useState("");
   const [preview, setPreview] = useState<RosterView | null>(null);
@@ -122,6 +123,25 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
       } else {
         setPreview(await api.rosters.preview(roster, source));
       }
+    } catch (err) {
+      setPreview(null);
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Fills the export in like a file would, and previews it.
+  const fetchKrooster = async () => {
+    const user = username.trim();
+    setError(null);
+    setBusy(true);
+    try {
+      const exported = await api.krooster.roster(user);
+      remember("krooster-user", user);
+      setText(JSON.stringify(exported));
+      if (!label) setLabel(user);
+      setPreview(await api.rosters.preview(exported, "krooster"));
     } catch (err) {
       setPreview(null);
       setError(errorText(err));
@@ -164,6 +184,28 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
         ))}
       </fieldset>
       <p className="muted small">{help}</p>
+      {source === "krooster" && (
+        <form
+          className="row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void fetchKrooster();
+          }}
+        >
+          <input
+            type="text"
+            value={username}
+            placeholder="Krooster username"
+            aria-label="Krooster username"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+          <button type="submit" disabled={busy || !username.trim()}>
+            Fetch roster
+          </button>
+        </form>
+      )}
       <textarea
         className="request"
         rows={8}

@@ -10,10 +10,10 @@ default_source = "en_US"
 
 [[sources]]
 name = "en_US"
-repo = "Kengxxiao/ArknightsGameData_YoStar"
-sha = "57010cb5b2afea112cae57daa756b58676ba6850"
-locale = "en_US"
-note = "Upstream commit 2025-11-13 (client 31.5.80). The YoStar repository was archived on that date, so this is the final Global snapshot from this source."
+repo = "ArknightsAssets/ArknightsGamedata"
+sha = "09df1ef62bb5e1ea3e22549a5b280c7083c85de4"
+locale = "en"
+note = "Global data extracted from the game servers by arkprts in GitHub Actions (the source Krooster uses). Upstream EN update of 2026-09-23, resource version 26-09-18-15-44-33_adcee5. It writes an empty list as {}, which the loader accepts. The earlier source, Kengxxiao/ArknightsGameData_YoStar, was archived on 2025-11-13 at client 31.5.80."
 files = ["building_data.json", "character_table.json", "handbook_team_table.json"]
 
 [[sources]]
@@ -22,5 +22,5 @@ repo = "Kengxxiao/ArknightsGameData"
 sha = "bb8f9ac8db143a661577ed6ef5184d3c6e93d1d0"
 locale = "zh_CN"
 enabled = false
-note = "Still actively updated (commit 2026-09-20, client 2.7.71). Same schema as en_US; Chinese display strings. Enable to ingest operators released after the Global snapshot."
+note = "Still actively updated (commit 2026-09-20, client 2.7.71). Same schema as en_US; Chinese display strings. Enable to ingest operators not yet released on Global."
 files = ["building_data.json", "character_table.json", "handbook_team_table.json"]

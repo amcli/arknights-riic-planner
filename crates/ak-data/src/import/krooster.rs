@@ -1,9 +1,15 @@
 //! Krooster (krooster.com, `neeia/ak-roster`) rosters.
 //!
-//! Krooster has no roster export button. Its roster lives in the browser's
-//! local storage and in its database, in one of these shapes (from
-//! `src/types/operators/operator.ts` and `src/util/hooks/useOperators.ts`):
+//! Krooster has no roster export button. A roster belongs to a Krooster
+//! account: it lives in Krooster's database, and the browser's local
+//! storage keeps a copy. It comes in these shapes (from
+//! `src/types/operators/operator.ts`, `src/util/hooks/useOperators.ts` and
+//! `src/pages/api/u/[user].tsx`):
 //!
+//! - **profile** (`Format::KroosterProfile`): what Krooster's public
+//!   profile route, `https://www.krooster.com/api/u/{username}`, answers:
+//!   `{ data: { account, supports, roster } }`, with `roster` in the
+//!   current shape. Only `roster` is read.
 //! - **current** (`Format::KroosterV3`), local storage key `v3_roster`: an
 //!   object keyed by operator id, each value
 //!   `{ op_id, elite, level, potential, skill_level, masteries, modules,
@@ -17,8 +23,11 @@
 //!   potential is non-zero; this adapter also skips entries marked
 //!   `owned: false`.
 //!
-//! To copy the current roster: open krooster.com, open the browser console,
-//! and run `copy(localStorage.getItem("v3_roster"))`.
+//! The profile is the easy one to get: every account has a username (the
+//! end of the profile link in Krooster's settings, `krooster.com/u/…`), and
+//! profiles are public. The local storage copy exists only in a browser
+//! where a roster page has loaded while logged in; there, the browser
+//! console's `copy(localStorage.getItem("v3_roster"))` copies it.
 //!
 //! Only `elite` (or `promotion`) and `level` matter to the base; potential,
 //! skills, masteries, modules and skins are read past.
@@ -42,12 +51,28 @@ pub fn import(data: &GameData, input: &Value) -> Result<Imported, ImportError> {
             }
             Format::KroosterV3Rows
         }
-        Value::Object(map) => {
-            if map.contains_key("p") && map.contains_key("s") {
-                return Err(not_krooster(
-                    "it looks like an ak-planner export; import it with source ak-planner",
-                ));
+        Value::Object(map) if map.contains_key("p") && map.contains_key("s") => {
+            return Err(not_krooster(
+                "it looks like an ak-planner export; import it with source ak-planner",
+            ));
+        }
+        // Operator ids start with `char_`, so a `data` key is the profile.
+        Value::Object(map) if map.contains_key("data") => {
+            let roster = map["data"]
+                .get("roster")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    not_krooster(
+                        "a Krooster profile keeps its roster under `data.roster`, \
+                         as operators keyed by id",
+                    )
+                })?;
+            for (key, value) in roster {
+                current(&mut b, &Entry::new(key.clone(), value)?)?;
             }
+            Format::KroosterProfile
+        }
+        Value::Object(map) => {
             let legacy = match map.values().next() {
                 None => false,
                 Some(first) if first.get("op_id").is_some() => false,

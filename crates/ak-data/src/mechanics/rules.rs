@@ -262,6 +262,14 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
                 product: None,
                 scope: Scope::AllRooms(RoomType::Manufacture),
             }),
+        r"the productivity of <K> of all factories <V>" =>
+            |c, _, _| one(Effect::Productivity {
+                amount: flat(pct(c, 2)?),
+                product: product(c, 1)?,
+                scope: Scope::AllRooms(RoomType::Manufacture),
+            }),
+        r"grants? an additional <V> to <K> formula productivity" =>
+            |c, _, _| one(prod(flat(pct(c, 1)?), product(c, 2)?)),
         r"all <T> operators assigned to factories gain productivity <V>" =>
             |c, ctx, _| one(Effect::Productivity {
                 amount: per_count(pct(c, 2)?, ops(group(c, 1)?, CountScope::TargetRoom), ctx),
@@ -279,6 +287,8 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         r"(?:capacity limit|storage capacity)(?: is increased by)? <V>" =>
             |c, _, _| one(Effect::Capacity { amount: flat(num(c, 1)?), product: None, scope: Scope::ThisRoom }),
         r"<V> capacity limit" =>
+            |c, _, _| one(Effect::Capacity { amount: flat(num(c, 1)?), product: None, scope: Scope::ThisRoom }),
+        r"gains? <V> (?:storage capacity|capacity limit)" =>
             |c, _, _| one(Effect::Capacity { amount: flat(num(c, 1)?), product: None, scope: Scope::ThisRoom }),
         // ---- Trading ----
         r"(?:trading post )?(?:an additional )?order acquisition efficiency <V>" => |c, _, _| one(order_eff(pct(c, 1)?)),
@@ -299,6 +309,28 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             |c, _, _| one(Effect::ScaleOthersContribution { stat: Stat::OrderEfficiency, percent: scale_pct(c, 1)? }),
         r"all trading posts' order efficiency <V>" =>
             |c, _, _| one(Effect::OrderEfficiency { amount: flat(pct(c, 1)?), scope: Scope::AllRooms(RoomType::Trading) }),
+        r"all <T> operators assigned to trading posts gain order acquisition efficiency <V>" =>
+            |c, ctx, _| one(Effect::OrderEfficiency {
+                amount: per_count(pct(c, 2)?, ops(group(c, 1)?, CountScope::TargetRoom), ctx),
+                scope: Scope::AllRooms(RoomType::Trading),
+            }),
+        // "All Trading Posts with 3 Kjerag Operators assigned": one unit per
+        // 3 counted in each Trading Post, at most one, so a Post earns it
+        // exactly when it holds 3 (a Trading Post seats 3).
+        r"all trading posts with <V> <T> operators assigned gain order acquisition efficiency <V>" =>
+            |c, _, _| {
+                let per = pct(c, 3)?;
+                one(Effect::OrderEfficiency {
+                    amount: Amount::PerCount {
+                        per,
+                        step: cnt(c, 1)?,
+                        counter: ops(group(c, 2)?, CountScope::TargetRoom),
+                        max_count: None,
+                        max_total: Some(per),
+                    },
+                    scope: Scope::AllRooms(RoomType::Trading),
+                })
+            },
         r"(?:the |that trading post's )?order limit(?: is increased by)? <V>" => |c, _, _| one(order_limit(num(c, 1)?)),
         r"<V> order limit" => |c, _, _| one(order_limit(num(c, 1)?)),
         r"reduces the order limit by <V>" => |c, _, _| one(order_limit(-num(c, 1)?.abs())),
@@ -327,6 +359,10 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
                 mood(num(c, 2)?, MoodTarget::SelfOnly),
                 mood(num(c, 2)?, MoodTarget::Named(who(s(c, 1)))),
             ]),
+        // Consumption up is a drain, whether upstream styles it as a gain or
+        // a loss.
+        r"morale consumed per hour by <K> <V>" =>
+            |c, _, _| one(mood(-num(c, 2)?, MoodTarget::Named(who(s(c, 1))))),
         // ---- Morale: room-wide ----
         r"morale loss of operators in the trading post <V> per hour" => |c, _, _| one(mood(-num(c, 1)?, MoodTarget::AllInRoom)),
         r"morale consumed per hour of all operators in the factory <V>" => |c, _, _| one(mood(-num(c, 1)?, MoodTarget::AllInRoom)),
@@ -352,7 +388,9 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         r"restores <V> morale per hour distributed evenly to operators assigned to that dormitory whose morale is not full" =>
             |c, _, _| one(mood(num(c, 1)?, MoodTarget::DistributedInRoom)),
         r"morale recovery per hour of all operators in that dormitory <V>" => |c, _, _| one(mood(num(c, 1)?, MoodTarget::AllInRoom)),
-        r"restores an additional <V> to operators whose morale is below <V>" =>
+        // Unmodeled: whole-room recovery stacks as "strongest of its type",
+        // which would swallow an *additional* amount for low-morale targets.
+        r"restores an additional <V>(?: morale)? to operators(?: assigned to that dormitory)? whose morale is below <V>" =>
             |c, _, _| one(Effect::Unmodeled { summary: format!("restores an additional {} to operators whose morale is below {}", s(c, 1), s(c, 2)) }),
         // ---- Reception ----
         r"(?:increases? )?clue (?:search|collection) speed(?: increases)?(?: by)?(?: an additional)? <V>" =>
@@ -361,6 +399,8 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         // ---- Office ----
         r"(?:increases? (?:the )?)?hr contacting speed(?: by)? <V>" => |c, _, _| one(Effect::ContactSpeed { amount: flat(pct(c, 1)?) }),
         r"<V> hr contacting speed" => |c, _, _| one(Effect::ContactSpeed { amount: flat(pct(c, 1)?) }),
+        r"hr contacting speed increases by (?:a further|an additional) <V>" =>
+            |c, _, _| one(Effect::ContactSpeed { amount: flat(pct(c, 1)?) }),
         r"(?:adds )?extra contacting speed <V>" => |c, _, _| one(Effect::ContactSpeed { amount: flat(pct(c, 1)?) }),
         // ---- Training ----
         r"(?:<K>(?: and <K>)? )?operators' specialization training speed ?<V>" =>
@@ -369,6 +409,7 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             |c, _, _| one(training(pct(c, 2)?, vec![profession(s(c, 1))?])),
         r"<V> specialization training speed" => |c, _, _| one(training(pct(c, 1)?, Vec::new())),
         r"that operator's specialization training speed <V>" => |c, _, _| one(training(pct(c, 1)?, Vec::new())),
+        r"training speed will be increased by <V>" => |c, _, _| one(training(pct(c, 1)?, Vec::new())),
         // ---- Workshop ----
         r"(?:the )?(?:production rate of byproduct|byproduct production rate|byproduct chance|byproduct production chance)(?: increases| is increased)?(?: by)? <V>" =>
             |c, ctx, _| one(byproduct(pct(c, 1)?, ctx)),
@@ -381,7 +422,7 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             |c, ctx, _| one(ws_cost(CostChange::Set(num(c, 1)?), None, ctx)),
         r"all formulas that cost <N> morale now <V> morale cost" =>
             |c, ctx, _| one(ws_cost(set_or_delta(val(c, 2)?), Some(CostFilter::Exactly(n(c, 1)?)), ctx)),
-        r"recipes with morale cost of <N> have <V> morale cost" =>
+        r"(?:any )?recipes with morale cost of <N> have <V> morale cost" =>
             |c, ctx, _| one(ws_cost(set_or_delta(val(c, 2)?), Some(CostFilter::Exactly(n(c, 1)?)), ctx)),
         r"any recipes with morale cost of <N> or higher have their morale cost divided by <V>" =>
             |c, ctx, _| one(ws_cost(CostChange::Divide(num(c, 2)?), Some(CostFilter::AtLeast(n(c, 1)?)), ctx)),
@@ -469,6 +510,7 @@ static EFFECT: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         r"the next <K> operator's skill specialization training to level <N> is completed immediately" => unmodeled,
         r"all <T> is removed" => unmodeled,
         r"remove all <T> and accumulated <T>" => unmodeled,
+        r"ignores the self morale loss effect from her own base skill" => unmodeled,
         r"<K>" => unmodeled,
     ]
 });
@@ -583,6 +625,45 @@ static COMPOUND: LazyLock<Vec<Compound>> = LazyLock::new(|| {
             |c, _| Ok(always(vec![clue_bias(&format!("more {} clues after each other clue", s(c, 1)))])),
         r"increases the likelihood of obtaining <K> clues for every newly-obtained clue that is not from <K>" =>
             |c, _| Ok(always(vec![clue_bias(&format!("more {} clues after each other clue", s(c, 1)))])),
+        // The counter leads both halves of "A and B"; split clauses would
+        // leave B unscaled.
+        r"<T> <V>; for every <V> <T>, self morale consumed per hour <V> and all trading posts' order efficiency <V>" =>
+            |c, ctx| {
+                let per_resource = |per: f64| -> Result<Amount, String> {
+                    Ok(Amount::PerCount {
+                        per,
+                        step: any(c, 3)?,
+                        counter: Counter::Resource { resource: resource(c, 4)? },
+                        max_count: ctx.max_count,
+                        max_total: ctx.max_total,
+                    })
+                };
+                Ok(always(vec![
+                    Effect::GainResource { resource: resource(c, 1)?, amount: flat(any(c, 2)?) },
+                    Effect::Mood { amount: per_resource(-num(c, 5)?)?, target: MoodTarget::SelfOnly },
+                    Effect::OrderEfficiency { amount: per_resource(pct(c, 6)?)?, scope: Scope::AllRooms(RoomType::Trading) },
+                ]))
+            },
+        // "Every Operator in that Factory" (self included) scales both
+        // halves of "Productivity by X and Capacity limit by Y".
+        r"the productivity contributed by all other operators in that factory <V>, but every operator in that factory increases that factory's (?:productivity by <V> and )?capacity limit by <V>" =>
+            |c, ctx| {
+                let mut effects = vec![Effect::ScaleOthersContribution { stat: Stat::Productivity, percent: scale_pct(c, 1)? }];
+                if c.get(2).is_some() {
+                    effects.push(prod(per_count(pct(c, 2)?, Counter::OperatorsInRoom, ctx), None));
+                }
+                effects.push(Effect::Capacity {
+                    amount: per_count(num(c, 3)?, Counter::OperatorsInRoom, ctx),
+                    product: None,
+                    scope: Scope::ThisRoom,
+                });
+                Ok(always(effects))
+            },
+        r"all <T>(?: operators)? in dormitories recover <V> morale per hour" =>
+            |c, _| Ok(vec![Clause {
+                when: Predicate::TargetIn { group: group(c, 1)? },
+                effect: mood(num(c, 2)?, MoodTarget::Rooms(RoomType::Dormitory)),
+            }]),
     ]
 });
 
@@ -662,7 +743,7 @@ static COUNTER: LazyLock<Vec<CounterRule>> = LazyLock::new(|| {
             |c| Ok((1.0, ops(terms::group(s(c, 1))?, CountScope::WorkAreas))),
         r"<T> operators? assigned to buildings other than dormitories and activity rooms" =>
             |c| Ok((1.0, ops(terms::group(s(c, 1))?, CountScope::WorkAreas))),
-        r"<T> operators? assigned to (?:the )?(factories|trading posts|power plants|control center|dormitories)" =>
+        r"<T> operators? assigned to (?:the )?(factories|trading posts|power plants|control center|dormitories|reception room)" =>
             |c| Ok((1.0, ops(terms::group(s(c, 1))?, CountScope::Rooms(room_of(s(c, 2))?)))),
         r"<V> <T> assigned to a power plant" =>
             |c| Ok((cnt(c, 1)?, ops(terms::group(s(c, 2))?, CountScope::Rooms(RoomType::Power)))),
@@ -677,10 +758,11 @@ static COUNTER: LazyLock<Vec<CounterRule>> = LazyLock::new(|| {
         r"\{K:trading posts?\}" => |_| Ok((1.0, Counter::RoomCount { room: RoomType::Trading })),
         r"(?:additional )?recruit(?:ment)? slot(?: other than the initial slot)?" => |_| Ok((1.0, Counter::RecruitSlots)),
         r"(?:<N> )?operator in the dormitor(?:y|ies)" => |c| Ok((cnt(c, 1)?, Counter::OperatorsInRooms { room: RoomType::Dormitory })),
+        r"<V> operators? in the dormitor(?:y|ies)" => |c| Ok((cnt(c, 1)?, Counter::OperatorsInRooms { room: RoomType::Dormitory })),
         r"additional operator" => |_| Ok((1.0, Counter::OtherOperatorsInRoom)),
         r"operator" => |_| Ok((1.0, Counter::OtherOperatorsInRoom)),
         r"<V> operators in that dormitory" => |c| Ok((cnt(c, 1)?, Counter::OperatorsInRoom)),
-        r"<T> in (?:the same|this) factory" =>
+        r"<T>(?: skills?)? in (?:the same|this|that) factory" =>
             |c| match terms::classify(s(c, 1)) {
                 Term::SkillFamily(f) => Ok((1.0, Counter::OperatorsWithSkillFamily { family: f })),
                 other => Err(format!("{other:?} is not a skill family")),
@@ -790,12 +872,13 @@ static COND: LazyLock<Vec<CondRule>> = LazyLock::new(|| {
                 Predicate::OperatorInWorkArea { who: who(s(c, 1)) },
                 Predicate::OperatorInWorkArea { who: who(s(c, 2)) },
             ] }),
-        r"(?:a|another) <T> operator is assigned to the same (?:trading post|factory)" =>
+        r"(?:a|an|another) <T> operator is assigned to the same (?:trading post|factory)" =>
             |c| pred(Predicate::CoworkerIn { group: terms::group(s(c, 1))? }),
         r"another <T> operator is assigned to a (power plant|factory|trading post)" =>
             |c| pred(Predicate::GroupInRoom { group: terms::group(s(c, 1))?, room: room_of(s(c, 2))? }),
-        r"assigned together with (?:another )?<T> operator" => |c| pred(Predicate::CoworkerIn { group: terms::group(s(c, 1))? }),
+        r"assigned together with (?:another )?<T> operators?" => |c| pred(Predicate::CoworkerIn { group: terms::group(s(c, 1))? }),
         r"assigned together with <K>" => |c| pred(Predicate::CoworkerIs { who: who(s(c, 1)) }),
+        r"assigned to the control center with <K>" => |c| pred(Predicate::CoworkerIs { who: who(s(c, 1)) }),
         r"(?:no other operators are working in the reception room|only this operator is working in the reception room)" =>
             |_| pred(Predicate::AloneInRoom),
         r"in clue exchange" => |_| pred(Predicate::InClueExchange),
@@ -809,6 +892,9 @@ static COND: LazyLock<Vec<CondRule>> = LazyLock::new(|| {
             |c| pred(Predicate::Not { inner: Box::new(Predicate::CountAtLeast { counter: ops(terms::group(s(c, 1))?, CountScope::Rooms(RoomType::Power)), n: 1 }) }),
         r"there are other operators in that dormitory" =>
             |_| pred(Predicate::CountAtLeast { counter: Counter::OtherOperatorsInRoom, n: 1 }),
+        // Written out, not as a term, in Sakiko Togawa's skill.
+        r"passion is <N> or higher" =>
+            |c| pred(Predicate::CountAtLeast { counter: counter_for_term("cc.bd_mujica", CountScope::Base)?, n: n(c, 1)? }),
         r"the target is (?:a )?<K>" => |c| pred(Predicate::TargetIsOperator { who: who(s(c, 1)) }),
         r"the target is (?:a )?<T>(?: operator)?" =>
             |c| match terms::classify(s(c, 1)) {

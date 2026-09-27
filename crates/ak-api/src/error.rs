@@ -51,6 +51,11 @@ impl ApiError {
     pub fn internal(message: impl ToString) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
+
+    /// `502`: a service we called failed us.
+    pub fn bad_gateway(message: impl ToString) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, message)
+    }
 }
 
 impl std::fmt::Display for ApiError {

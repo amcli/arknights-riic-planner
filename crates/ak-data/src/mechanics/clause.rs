@@ -35,6 +35,7 @@ fn rx(p: &str) -> Regex {
 
 static STRONGEST: LazyLock<Regex> = LazyLock::new(|| rx(r"(?i)strongest|most effective"));
 static CAPS_AT: LazyLock<Regex> = LazyLock::new(|| rx(r"(?i)caps? at \{K:(\d+)\}"));
+static CAPS_AT_V: LazyLock<Regex> = LazyLock::new(|| rx(r"(?i)caps? at <V>"));
 static PAREN_MAX_N: LazyLock<Regex> = LazyLock::new(|| rx(r"(?i)\(max (\d+)\)"));
 static PAREN_MAX_V: LazyLock<Regex> = LazyLock::new(|| rx(r"(?i)\(max <V>\)"));
 static TRAIL_MAX_V: LazyLock<Regex> = LazyLock::new(|| rx(r"(?i),? max <V>$"));
@@ -58,8 +59,11 @@ pub fn preprocess(body: &str) -> (String, Notes) {
         .captures(body)
         .and_then(|c| c[1].parse().ok())
         .or_else(|| PAREN_MAX_N.captures(body).and_then(|c| c[1].parse().ok()));
+    // "(max +20%)", or "(…, caps at +20%, …)", which caps the total rather
+    // than the count.
     let mut max_total = PAREN_MAX_V
         .captures(body)
+        .or_else(|| CAPS_AT_V.captures(body))
         .and_then(|c| parse_value(&c[1]).ok())
         .map(|v| v.n);
     let excluding_self = EXCLUDING_SELF.is_match(body);
@@ -427,6 +431,13 @@ mod tests {
         assert_eq!(s, "restores {V:+0.1} Morale per hour to all Operators; x");
         assert_eq!(n.stacking, Stacking::StrongestOfType);
         assert_eq!(n.max_count, Some(4.0));
+        assert_eq!(n.max_total, None);
+
+        // A cap written as a value bounds the total.
+        let (_, n) =
+            preprocess("speed {V:+4%} for each x (excluding y, caps at {V:+20%}, strongest)");
+        assert_eq!(n.max_count, None);
+        assert_eq!(n.max_total, Some(20.0));
     }
 
     #[test]

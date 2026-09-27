@@ -39,14 +39,24 @@ fn flat(v: f64) -> Amount {
 
 /// Pinned coverage. Raise these when the parser improves; never lower them
 /// without a note in the commit explaining what regressed and why.
-const MIN_FULLY_MODELED: usize = 589;
-const MAX_PARTIAL: usize = 51;
+///
+/// Re-based for the 2026-09-23 EN data (ArknightsAssets) with nothing
+/// regressed: of the 640 earlier tiers, 635 parse identically and 5 differ
+/// only where upstream reworded them. Its 75 new tiers all parse, 70 fully
+/// and 5 partially; the partial ones cancel another skill's drain
+/// (`control_mp_cost_reset[000]`), add low-morale recovery that the
+/// stacking model cannot express (`dorm_rec_all&tired[100]`), or count
+/// things with no counter yet (`control_prod_tra_spd[000]`,
+/// `trade_ord_spd&tag[010]` / `[020]`).
+const TIERS: usize = 715;
+const MIN_FULLY_MODELED: usize = 659;
+const MAX_PARTIAL: usize = 56;
 const MAX_REJECTED: usize = 0;
 
 #[test]
 fn coverage_ratchet() {
     let m = &loaded().report.mechanics;
-    assert_eq!(m.tiers, 640);
+    assert_eq!(m.tiers, TIERS);
     assert!(
         m.parsed >= MIN_FULLY_MODELED,
         "fully modelled dropped to {} (< {MIN_FULLY_MODELED})",
@@ -462,6 +472,235 @@ fn partial_skills_name_their_gaps() {
             ..
         }
     )));
+}
+
+// ---- skills added in the 2026-09 data --------------------------------------
+
+fn power(id: &str) -> Group {
+    Group::Power(PowerId::new(id))
+}
+
+fn per_count(per: f64, step: f64, counter: Counter) -> Amount {
+    Amount::PerCount {
+        per,
+        step,
+        counter,
+        max_count: None,
+        max_total: None,
+    }
+}
+
+#[test]
+fn kjerag_is_the_nation_and_three_fill_a_trading_post() {
+    // `cc.g.karlan` reads 谢拉格 (Kjerag) in CN; Global's old "Karlan Trade"
+    // named a smaller group.
+    assert!(matches!(
+        effects("control_tra_limit&spd[000]")[1],
+        Effect::OrderLimit {
+            amount: Amount::PerCount { counter: Counter::Operators { group, .. }, .. },
+            ..
+        } if *group == power("kjerag")
+    ));
+    // "All Trading Posts with 3 Kjerag Operators assigned": one unit per 3
+    // in each Trading Post, at most one.
+    assert_eq!(
+        effects("control_tra_limit&spd3[000]"),
+        vec![&Effect::OrderEfficiency {
+            amount: Amount::PerCount {
+                per: 10.0,
+                step: 3.0,
+                counter: Counter::Operators {
+                    group: power("kjerag"),
+                    scope: CountScope::TargetRoom,
+                    excluding_self: false,
+                },
+                max_count: None,
+                max_total: Some(10.0),
+            },
+            scope: Scope::AllRooms(RoomType::Trading),
+        }]
+    );
+}
+
+#[test]
+fn passion_accumulates_and_scales_like_other_resources() {
+    let passion = || Counter::Resource {
+        resource: "passion".into(),
+    };
+    // "Passion +20; for every 8 Passion, self Morale consumed per hour
+    // +0.01 and all Trading Posts' order efficiency +1%": the counter
+    // scales both halves.
+    assert_eq!(
+        effects("control_mp_bd&trade[000]"),
+        vec![
+            &Effect::GainResource {
+                resource: "passion".into(),
+                amount: flat(20.0),
+            },
+            &Effect::Mood {
+                amount: per_count(-0.01, 8.0, passion()),
+                target: MoodTarget::SelfOnly,
+            },
+            &Effect::OrderEfficiency {
+                amount: per_count(1.0, 8.0, passion()),
+                scope: Scope::AllRooms(RoomType::Trading),
+            },
+        ]
+    );
+    // "… with an additional +0.5% for every 20 Passion".
+    assert_eq!(
+        effects("control_prod_bd_spd[000]")[1],
+        &Effect::Productivity {
+            amount: per_count(0.5, 20.0, passion()),
+            product: Some(ProductType::Gold),
+            scope: Scope::AllRooms(RoomType::Manufacture),
+        }
+    );
+    // Written as a plain word in Sakiko Togawa's own skill.
+    assert_eq!(
+        mechanics("control_mp_cost&bd3[000]").clauses[0].when,
+        Predicate::CountAtLeast {
+            counter: passion(),
+            n: 40
+        }
+    );
+}
+
+#[test]
+fn skills_that_name_a_partner_resolve_them() {
+    let is = |who: &OperatorRef, id: &str| who.id.as_ref().map(OperatorId::as_str) == Some(id);
+    // With Sakiko Togawa in the Control Center, her own Morale drain rises.
+    let m = mechanics("control_mp&meet_spd[000]");
+    match (&m.clauses[0].when, &m.clauses[0].effect) {
+        (
+            Predicate::CoworkerIs { who },
+            Effect::Mood {
+                amount,
+                target: MoodTarget::Named(target),
+            },
+        ) => {
+            assert!(is(who, "char_4182_oblvns") && is(target, "char_4182_oblvns"));
+            assert_eq!(*amount, flat(-0.05));
+        }
+        other => panic!("{other:?}"),
+    }
+    // More consumption is a drain even where upstream styles it as a gain.
+    assert!(matches!(
+        &mechanics("control_dorm_rec2[000]").clauses[1].effect,
+        Effect::Mood { amount, .. } if *amount == flat(-0.1)
+    ));
+    // "If SilverAsh the Reignfrost is assigned to the Control Center".
+    let m = mechanics("hire_spd_cost&char[001]");
+    match (&m.clauses[2].when, &m.clauses[2].effect) {
+        (
+            Predicate::OperatorInRoom {
+                who,
+                room: RoomType::Control,
+            },
+            Effect::ContactSpeed { amount },
+        ) => {
+            assert!(is(who, "char_1045_svash2"));
+            assert_eq!(*amount, flat(10.0));
+        }
+        other => panic!("{other:?}"),
+    }
+    // Cancelling another skill's drain is named, not modelled.
+    assert!(!mechanics("control_mp_cost_reset[000]").is_fully_modeled());
+}
+
+#[test]
+fn every_operator_in_the_factory_raises_capacity() {
+    assert_eq!(
+        effects("manu_prod_spd&manu[100]"),
+        vec![
+            &Effect::ScaleOthersContribution {
+                stat: Stat::Productivity,
+                percent: -100.0
+            },
+            &Effect::Productivity {
+                amount: per_count(10.0, 1.0, Counter::OperatorsInRoom),
+                product: None,
+                scope: Scope::ThisRoom,
+            },
+            &Effect::Capacity {
+                amount: per_count(5.0, 1.0, Counter::OperatorsInRoom),
+                product: None,
+                scope: Scope::ThisRoom,
+            },
+        ]
+    );
+    // "+5 Storage Capacity for each Rhine Tech-type skill in that Factory".
+    assert_eq!(
+        effects("manu_skill_limit[000]"),
+        vec![&Effect::Capacity {
+            amount: per_count(
+                5.0,
+                1.0,
+                Counter::OperatorsWithSkillFamily {
+                    family: "manu2".into()
+                }
+            ),
+            product: None,
+            scope: Scope::ThisRoom,
+        }]
+    );
+}
+
+#[test]
+fn new_groups_caps_and_filters() {
+    // "All Elite Operators in Dormitories recover +0.1 Morale per hour".
+    assert_eq!(
+        mechanics("control_dorm_rec_tag[001]").clauses,
+        vec![Clause {
+            when: Predicate::TargetIn {
+                group: power("elite")
+            },
+            effect: Effect::Mood {
+                amount: flat(0.1),
+                target: MoodTarget::Rooms(RoomType::Dormitory),
+            },
+        }]
+    );
+    // "+4% for each Minos Operator in the Base (…, caps at +20%)"; with
+    // Sargon Operators alongside, a self drain.
+    let m = mechanics("control_meeting&mp_cost[000]");
+    assert_eq!(
+        *m.clauses[0].effect.amount().unwrap(),
+        Amount::PerCount {
+            per: 4.0,
+            step: 1.0,
+            counter: Counter::Operators {
+                group: power("minos"),
+                scope: CountScope::Base,
+                excluding_self: false,
+            },
+            max_count: None,
+            max_total: Some(20.0),
+        }
+    );
+    assert_eq!(
+        m.clauses[1].when,
+        Predicate::CoworkerIn {
+            group: power("sargon")
+        }
+    );
+    // Only when training to Specialization 3; only Oriron Cluster recipes
+    // costing 2.
+    assert!(matches!(
+        effects("train_spd&level[000]")[0],
+        Effect::TrainingSpeed {
+            spec_level: Some(3),
+            ..
+        }
+    ));
+    assert_eq!(
+        effects("workshop_formula_cost5[100]"),
+        vec![&Effect::WorkshopMoodCost {
+            change: CostChange::Delta(-1.0),
+            material: MaterialFilter::Named("Oriron Cluster".into()),
+            cost: Some(CostFilter::Exactly(2)),
+        }]
+    );
 }
 
 // ---- cross-check against upstream's efficiency hint ---------------------------

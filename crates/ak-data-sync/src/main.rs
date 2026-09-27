@@ -14,10 +14,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
+use ureq::tls::{TlsConfig, TlsProvider};
 
 use ak_data::manifest::{
     BUILDING_FILE, CHARACTER_FILE, DataSource, FileRecord, MANIFEST_FILE, Manifest,
@@ -106,11 +108,12 @@ fn sync(root: &Path, source: &DataSource, force: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let agent = agent();
     let mut files = BTreeMap::new();
     for file in &source.files {
         let url = source.raw_url(file);
         tracing::info!(%url, "fetching");
-        let bytes = fetch(&url)?;
+        let bytes = fetch(&agent, &url)?;
         let path = dir.join(file);
         fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
         files.insert(
@@ -137,8 +140,25 @@ fn sync(root: &Path, source: &DataSource, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn fetch(url: &str) -> anyhow::Result<Vec<u8>> {
-    let mut response = ureq::get(url)
+/// The HTTP agent for downloads. The workspace builds ureq with native-tls
+/// only, and ureq's default provider is rustls: without choosing native-tls
+/// here, every https fetch panics.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .tls_config(
+            TlsConfig::builder()
+                .provider(TlsProvider::NativeTls)
+                .build(),
+        )
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(600)))
+        .build()
+        .into()
+}
+
+fn fetch(agent: &ureq::Agent, url: &str) -> anyhow::Result<Vec<u8>> {
+    let mut response = agent
+        .get(url)
         .call()
         .with_context(|| format!("GET {url}"))?;
     let bytes = response
@@ -248,4 +268,17 @@ fn validate(root: &Path, source: &DataSource) -> anyhow::Result<()> {
         "strict transform passed"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn https_goes_through_native_tls() {
+        assert_eq!(
+            agent().config().tls_config().provider(),
+            TlsProvider::NativeTls
+        );
+    }
 }
