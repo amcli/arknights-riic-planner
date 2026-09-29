@@ -35,7 +35,8 @@ export function App() {
           </nav>
         </div>
       </header>
-      <main>
+      {/* A solve's results sit in two columns, so that screen gets more width. */}
+      <main className={route.page === "results" && route.id ? "wide" : undefined}>
         <p className="intro muted">{INTRO[route.page]}</p>
         <GameDataProvider>
           {route.page === "rosters" && <RostersView />}

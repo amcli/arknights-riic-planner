@@ -237,102 +237,110 @@ function Finished({ job }: { job: SolveJob }) {
 
   return (
     <>
-      <div className="card">
-        {result.stopped && (
-          <p className="warn">
-            The search was {result.stopped === "time_budget" ? "cut off by its time budget" : "stopped on request"}; these
-            are the best found until then.
-          </p>
-        )}
-        <Tiles c={candidate} reference={selected === 0 ? result.initial : best} referenceLabel={selected === 0 ? "the start" : "the best"} horizon={horizon} />
-        <p className="muted small">
-          {result.strategy === "exhaustive" ? "Exhaustive search" : "Simulated annealing"} over {result.space.variable_slots} slots and{" "}
-          {result.space.pool} operators (about {result.space.estimated_size.toExponential(1)} arrangements): {fmt(result.evaluations)}{" "}
-          quick evaluations, {fmt(result.simulations)} full simulations, {fmt(result.elapsed_ms / 1000, 1)} s. Per-day figures
-          are the {fmt(horizon)} h totals scaled to 24 h.
-        </p>
-      </div>
+      {/* Two columns: choosing a finalist on the left, what it looks like on
+          the right (wider, for the map). */}
+      <div className="split results">
+        <div className="stack">
+          <div className="card">
+            {result.stopped && (
+              <p className="warn">
+                The search was {result.stopped === "time_budget" ? "cut off by its time budget" : "stopped on request"}; these
+                are the best found until then.
+              </p>
+            )}
+            <Tiles c={candidate} reference={selected === 0 ? result.initial : best} referenceLabel={selected === 0 ? "the start" : "the best"} horizon={horizon} />
+            <p className="muted small">
+              {result.strategy === "exhaustive" ? "Exhaustive search" : "Simulated annealing"} over {result.space.variable_slots} slots and{" "}
+              {result.space.pool} operators (about {result.space.estimated_size.toExponential(1)} arrangements): {fmt(result.evaluations)}{" "}
+              quick evaluations, {fmt(result.simulations)} full simulations, {fmt(result.elapsed_ms / 1000, 1)} s. Per-day figures
+              are the {fmt(horizon)} h totals scaled to 24 h.
+            </p>
+          </div>
 
-      <div className="card">
-        <h2 className="card-title">Finalists</h2>
-        <div className="table-scroll">
-          <table className="finalists">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th className="num">Score</th>
-                <th className="num">vs best</th>
-                <th className="num">LMD / day</th>
-                <th className="num">EXP / day</th>
-                <th className="num">Orundum / day</th>
-                <th className="num">Drones / day</th>
-                <th className="num">Exhausted h</th>
-              </tr>
-            </thead>
-            <tbody>
-              {result.candidates.map((c, i) => (
-                <tr key={i} className={i === selected ? "selected" : undefined}>
-                  <td>
-                    <button type="button" className="link" onClick={() => setSelected(i)} aria-pressed={i === selected}>
-                      {i === 0 ? "Best" : `#${i + 1}`}
-                    </button>
-                  </td>
-                  <td className="num">{fmt(c.score)}</td>
-                  <td className="num">{i === 0 ? "" : change(c.score, best.score)}</td>
-                  <td className="num">{fmt(perDay(c.breakdown.lmd, horizon))}</td>
-                  <td className="num">{fmt(perDay(c.breakdown.exp, horizon))}</td>
-                  <td className="num">{fmt(perDay(c.breakdown.orundum, horizon))}</td>
-                  <td className="num">{fmt(perDay(c.breakdown.drones, horizon))}</td>
-                  <td className="num">{fmt(c.breakdown.exhausted_hours, 1)}</td>
-                </tr>
-              ))}
-              <tr className="reference">
-                <td>Start</td>
-                <td className="num">{fmt(result.initial.score)}</td>
-                <td className="num">{change(result.initial.score, best.score)}</td>
-                <td className="num">{fmt(perDay(result.initial.breakdown.lmd, horizon))}</td>
-                <td className="num">{fmt(perDay(result.initial.breakdown.exp, horizon))}</td>
-                <td className="num">{fmt(perDay(result.initial.breakdown.orundum, horizon))}</td>
-                <td className="num">{fmt(perDay(result.initial.breakdown.drones, horizon))}</td>
-                <td className="num">{fmt(result.initial.breakdown.exhausted_hours, 1)}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div className="card">
+            <h2 className="card-title">Finalists</h2>
+            <div className="table-scroll">
+              <table className="finalists compact-rows">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th className="num">Score</th>
+                    <th className="num">vs best</th>
+                    <th className="num">LMD / day</th>
+                    <th className="num">EXP / day</th>
+                    <th className="num">Orundum / day</th>
+                    <th className="num">Drones / day</th>
+                    <th className="num">Exhausted h</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.candidates.map((c, i) => (
+                    <tr key={i} className={i === selected ? "selected" : undefined}>
+                      <td>
+                        <button type="button" className="link" onClick={() => setSelected(i)} aria-pressed={i === selected}>
+                          {i === 0 ? "Best" : `#${i + 1}`}
+                        </button>
+                      </td>
+                      <td className="num">{fmt(c.score)}</td>
+                      <td className="num">{i === 0 ? "" : change(c.score, best.score)}</td>
+                      <td className="num">{fmt(perDay(c.breakdown.lmd, horizon))}</td>
+                      <td className="num">{fmt(perDay(c.breakdown.exp, horizon))}</td>
+                      <td className="num">{fmt(perDay(c.breakdown.orundum, horizon))}</td>
+                      <td className="num">{fmt(perDay(c.breakdown.drones, horizon))}</td>
+                      <td className="num">{fmt(c.breakdown.exhausted_hours, 1)}</td>
+                    </tr>
+                  ))}
+                  <tr className="reference">
+                    <td>Start</td>
+                    <td className="num">{fmt(result.initial.score)}</td>
+                    <td className="num">{change(result.initial.score, best.score)}</td>
+                    <td className="num">{fmt(perDay(result.initial.breakdown.lmd, horizon))}</td>
+                    <td className="num">{fmt(perDay(result.initial.breakdown.exp, horizon))}</td>
+                    <td className="num">{fmt(perDay(result.initial.breakdown.orundum, horizon))}</td>
+                    <td className="num">{fmt(perDay(result.initial.breakdown.drones, horizon))}</td>
+                    <td className="num">{fmt(result.initial.breakdown.exhausted_hours, 1)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p className="muted small">
+              Finalists have distinct scores, so each is a real trade-off. The start is what the solve began from
+              {startEmpty ? " (an empty base, since nothing was pinned)" : " (the pinned operators)"}.
+            </p>
+          </div>
         </div>
-        <p className="muted small">
-          Finalists have distinct scores, so each is a real trade-off. The start is what the solve began from
-          {startEmpty ? " (an empty base, since nothing was pinned)" : " (the pinned operators)"}.
-        </p>
-      </div>
 
-      <div className="card">
-        <div className="card-head">
-          <h2 className="card-title">{selected === 0 ? "Best assignment" : `Finalist #${selected + 1}`}</h2>
-          <label className="inline">
-            <span className="small muted">Mark changes against</span>
-            <select value={baseline} onChange={(e) => setBaseline(e.target.value as Baseline)}>
-              <option value="best">the best</option>
-              <option value="start" disabled={startEmpty}>
-                the start
-              </option>
-              <option value="none">nothing</option>
-            </select>
-          </label>
+        <div className="stack">
+          <div className="card">
+            <div className="card-head">
+              <h2 className="card-title">{selected === 0 ? "Best assignment" : `Finalist #${selected + 1}`}</h2>
+              <label className="inline">
+                <span className="small muted">Mark changes against</span>
+                <select value={baseline} onChange={(e) => setBaseline(e.target.value as Baseline)}>
+                  <option value="best">the best</option>
+                  <option value="start" disabled={startEmpty}>
+                    the start
+                  </option>
+                  <option value="none">nothing</option>
+                </select>
+              </label>
+            </div>
+            <BaseMap
+              base={base}
+              assignment={candidate.assignment}
+              baseline={against}
+              label={`Where every operator goes in ${selected === 0 ? "the best assignment" : `finalist ${selected + 1}`}`}
+            />
+            {against && <Changes base={base} now={candidate.assignment} before={against} />}
+          </div>
+
+          <div className="card">
+            <h2 className="card-title">Rooms, per day</h2>
+            {simError && <p className="error">{simError}</p>}
+            {!sim && !simError && <p className="muted">Simulating…</p>}
+            {sim && <RoomTable sim={sim} horizon={horizon} name={data.name} />}
+          </div>
         </div>
-        <BaseMap
-          base={base}
-          assignment={candidate.assignment}
-          baseline={against}
-          label={`Where every operator goes in ${selected === 0 ? "the best assignment" : `finalist ${selected + 1}`}`}
-        />
-        {against && <Changes base={base} now={candidate.assignment} before={against} />}
-      </div>
-
-      <div className="card">
-        <h2 className="card-title">Rooms, per day</h2>
-        {simError && <p className="error">{simError}</p>}
-        {!sim && !simError && <p className="muted">Simulating…</p>}
-        {sim && <RoomTable sim={sim} horizon={horizon} name={data.name} />}
       </div>
 
       <div className="card">
@@ -372,7 +380,7 @@ function Tiles({ c, reference, referenceLabel, horizon }: { c: Candidate; refere
             <span className="tile-label">{t.label}</span>
             <span className="tile-value">{compact(t.value)}</span>
             <span className={`tile-delta ${up ? "up" : down ? "down" : ""}`}>
-              {up ? "▲" : down ? "▼" : "="} {change(t.value, t.before)} vs {referenceLabel}
+              {up ? "▲" : down ? "▼" : "="} {change(t.value, t.before)} <span className="nowrap">vs {referenceLabel}</span>
             </span>
           </div>
         );
