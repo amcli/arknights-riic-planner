@@ -87,6 +87,13 @@ main {
   padding: 16px 16px 64px;
 }
 
+/* Room for a solve's two columns (see .split.results). */
+@media (min-width: 1280px) {
+  main.wide {
+    max-width: 1600px;
+  }
+}
+
 a {
   color: var(--accent);
 }
@@ -112,6 +119,10 @@ h3 {
 
 .small {
   font-size: 0.85rem;
+}
+
+.nowrap {
+  white-space: nowrap;
 }
 
 .error {
@@ -210,6 +221,24 @@ nav a[aria-current="page"] {
   .split,
   .split.wide-right {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A finished solve: the finalists beside the chosen one's map and rooms.
+   The map is the widest thing there, so it gets the wider column and
+   shrinks to fit it; below 1280px that would leave it too small to read,
+   so the columns stack and the map scrolls as it does elsewhere. */
+.split.results {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 1280px) {
+  .split.results {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 4fr);
+  }
+
+  .split.results .base-map {
+    min-width: 0;
   }
 }
 
@@ -666,7 +695,7 @@ ul.changes .removed {
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
