@@ -4,9 +4,11 @@
 
 import { useEffect, useState } from "react";
 import { api, type BaseConfig, type DocumentMeta, type Profession, type Room, type RoomType } from "../api";
-import { BaseMap } from "../components/BaseMap";
+import { BaseMap, toneOf } from "../components/BaseMap";
+import { IconCheck, IconCopy, IconPlus, IconSave, IconTrash, IconX } from "../components/icons";
+import { Callout, Meter, PageHeader } from "../components/ui";
 import { useGameData, type GameData } from "../data";
-import { byFormulaId, errorText, formulaLabel, PROFESSIONS, roomName, when } from "../format";
+import { ago, byFormulaId, errorText, formulaLabel, PROFESSIONS, roomName, when } from "../format";
 import { EXAMPLE_BASE } from "../presets";
 import { recall, remember } from "../storage";
 
@@ -101,23 +103,24 @@ function RoomRow({
 
   return (
     <li className="room-row">
-      <span className="room-name">
-        {roomName(room.kind)} <code className="muted">{room.id}</code>
+      <span className={`swatch ${toneOf(room.kind, data.facilities)}`} aria-hidden="true" />
+      <span className="room-name" title={`${roomName(room.kind)} (${room.id})`}>
+        {roomName(room.kind)} <span className="id">{room.id}</span>
       </span>
-      <label className="inline">
-        <span className="sr-only">Level of {room.id}</span>
-        <select value={room.level} onChange={(e) => setLevel(Number(e.target.value))}>
-          {levels.map((l) => (
-            <option key={l} value={l}>
-              Level {l}
-            </option>
-          ))}
-        </select>
-      </label>
-      {room.kind === "MANUFACTURE" && (
-        <label className="inline">
-          <span className="sr-only">Formula of {room.id}</span>
-          <select value={s.formula ?? ""} onChange={(e) => set({ ...s, formula: e.target.value || null })}>
+      <select value={room.level} aria-label={`Level of ${room.id}`} onChange={(e) => setLevel(Number(e.target.value))}>
+        {levels.map((l) => (
+          <option key={l} value={l}>
+            Level {l}
+          </option>
+        ))}
+      </select>
+      <div className="room-settings">
+        {room.kind === "MANUFACTURE" && (
+          <select
+            value={s.formula ?? ""}
+            aria-label={`Formula of ${room.id}`}
+            onChange={(e) => set({ ...s, formula: e.target.value || null })}
+          >
             <option value="">Idle</option>
             {formulas.map((fm) => (
               <option key={fm.id} value={fm.id}>
@@ -125,41 +128,37 @@ function RoomRow({
               </option>
             ))}
           </select>
-        </label>
-      )}
-      {room.kind === "TRADING" && (
-        <label className="inline">
-          <span className="sr-only">Orders of {room.id}</span>
+        )}
+        {room.kind === "TRADING" && (
           <select
             value={s.strategy ?? "gold"}
+            aria-label={`Orders of ${room.id}`}
             onChange={(e) => set({ ...s, strategy: e.target.value as "gold" | "originium_shard" })}
           >
             <option value="gold">Pure Gold → LMD</option>
             <option value="originium_shard">Originium Shard → Orundum</option>
           </select>
-        </label>
-      )}
-      {room.kind === "DORMITORY" && (
-        <label className="inline">
-          <span>Ambience</span>
-          <input
-            type="number"
-            min={0}
-            max={data.constants.comfort_limit}
-            step={100}
-            value={s.ambience ?? 0}
-            onChange={(e) =>
-              set({ ...s, ambience: Math.max(0, Math.min(data.constants.comfort_limit, Number(e.target.value) || 0)) })
-            }
-          />
-        </label>
-      )}
-      {room.kind === "TRAINING" && (
-        <>
+        )}
+        {room.kind === "DORMITORY" && (
           <label className="inline">
-            <span className="sr-only">Trainee class for {room.id}</span>
+            <span>Ambience</span>
+            <input
+              type="number"
+              min={0}
+              max={data.constants.comfort_limit}
+              step={100}
+              value={s.ambience ?? 0}
+              onChange={(e) =>
+                set({ ...s, ambience: Math.max(0, Math.min(data.constants.comfort_limit, Number(e.target.value) || 0)) })
+              }
+            />
+          </label>
+        )}
+        {room.kind === "TRAINING" && (
+          <>
             <select
               value={s.training?.profession ?? ""}
+              aria-label={`Trainee class for ${room.id}`}
               onChange={(e) =>
                 set({
                   ...s,
@@ -176,30 +175,31 @@ function RoomRow({
                 </option>
               ))}
             </select>
-          </label>
-          {s.training && (
-            <label className="inline">
-              <span className="sr-only">Specialization level for {room.id}</span>
+            {s.training && (
               <select
+                className="spec"
                 value={s.training.spec_level}
+                aria-label={`Specialization level for ${room.id}`}
                 onChange={(e) =>
                   s.training && set({ ...s, training: { ...s.training, spec_level: Number(e.target.value) } })
                 }
               >
                 {[1, 2, 3].map((l) => (
                   <option key={l} value={l}>
-                    to Specialization {l}
+                    to S{l}
                   </option>
                 ))}
               </select>
-            </label>
-          )}
-        </>
-      )}
-      {onRemove && (
-        <button type="button" className="link" onClick={onRemove} aria-label={`Remove ${room.id}`}>
-          Remove
+            )}
+          </>
+        )}
+      </div>
+      {onRemove ? (
+        <button type="button" className="ghost icon sm" onClick={onRemove} aria-label={`Remove ${room.id}`} title="Remove room">
+          <IconX size={14} />
         </button>
+      ) : (
+        <span />
       )}
     </li>
   );
@@ -224,6 +224,7 @@ function Editor({
   const [adding, setAdding] = useState<RoomType>("MANUFACTURE");
   const [message, setMessage] = useState<{ error?: string; ok?: string }>({});
   const [busy, setBusy] = useState(false);
+  const dirty = name !== doc.name || JSON.stringify(base) !== JSON.stringify(doc.base);
 
   const counts = new Map<RoomType, number>();
   for (const r of base.rooms) counts.set(r.kind, (counts.get(r.kind) ?? 0) + 1);
@@ -272,36 +273,64 @@ function Editor({
   const ordered = [...base.rooms].sort((a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind));
 
   return (
-    <div className="stack">
-      <div className="card">
-        <div className="card-head">
-          <label className="field grow">
-            <span>Name</span>
-            <input type="text" value={name} placeholder="My base" onChange={(e) => setName(e.target.value)} />
-          </label>
-          <div className="actions tight">
-            {doc.id &&
-              (active ? (
-                <span className="badge">Used for planning</span>
-              ) : (
-                <button type="button" className="secondary" onClick={onUse}>
-                  Use for planning
-                </button>
-              ))}
-          </div>
+    <section className="card">
+      <header className="card-head editor-head">
+        <div className="title-input">
+          <input
+            type="text"
+            value={name}
+            placeholder="Name this base"
+            aria-label="Name"
+            onChange={(e) => setName(e.target.value)}
+          />
+          {active && <span className="badge accent dot">Used for planning</span>}
+          {!doc.id ? (
+            <span className="badge warn dot">Not saved yet</span>
+          ) : dirty ? (
+            <span className="badge warn dot">Unsaved changes</span>
+          ) : (
+            message.ok && <span className="badge good dot">Saved</span>
+          )}
         </div>
-        <div className="budgets">
-          {budgets(base, data).map((b) => (
-            <div key={b.label} className={b.used > b.limit ? "budget over" : "budget"}>
-              <span className="muted small">{b.label}</span>
-              <span className="num">
-                {b.used} / {b.limit}
-              </span>
-              {b.used > b.limit && <span className="small warn">over the limit</span>}
-            </div>
-          ))}
+        <div className="row">
+          {doc.id && !active && (
+            <button type="button" className="secondary sm" onClick={onUse}>
+              <IconCheck size={14} /> Use for planning
+            </button>
+          )}
+          {doc.id && (
+            <button type="button" className="ghost danger sm" onClick={() => void remove()}>
+              <IconTrash size={14} /> Delete
+            </button>
+          )}
+          {doc.id && (
+            <button type="button" className="secondary sm" disabled={busy} onClick={() => void save(true)}>
+              <IconCopy size={14} /> Save as new
+            </button>
+          )}
+          <button type="button" className="sm" disabled={busy} onClick={() => void save(false)}>
+            <IconSave size={14} /> {doc.id ? "Save changes" : "Save base"}
+          </button>
         </div>
-        <ul className="room-list">
+      </header>
+      <div className="meters">
+        {budgets(base, data).map((b) => (
+          <Meter key={b.label} label={b.label} used={b.used} limit={b.limit} />
+        ))}
+      </div>
+      {message.error && (
+        <div className="card-body">
+          <Callout tone="error">{message.error}</Callout>
+        </div>
+      )}
+      <div className="map-panel">
+        <BaseMap base={base} label="The base's rooms on the in-game floor plan" />
+      </div>
+      <div className="card-body">
+        <div className="section-label">
+          Rooms <span className="count">{base.rooms.length}</span>
+        </div>
+        <ul className="room-grid">
           {ordered.map((room) => (
             <RoomRow
               key={room.id}
@@ -315,44 +344,26 @@ function Editor({
             />
           ))}
         </ul>
-        <div className="row">
-          <label className="inline">
-            <span className="sr-only">Room kind to add</span>
-            <select value={kind ?? ""} onChange={(e) => setAdding(e.target.value as RoomType)} disabled={!kind}>
-              {addable.map((k) => (
-                <option key={k} value={k}>
-                  {roomName(k)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" className="secondary" onClick={add} disabled={!kind}>
-            Add room
+        <div className="add-room">
+          <select
+            value={kind ?? ""}
+            aria-label="Room kind to add"
+            onChange={(e) => setAdding(e.target.value as RoomType)}
+            disabled={!kind}
+          >
+            {addable.map((k) => (
+              <option key={k} value={k}>
+                {roomName(k)}
+              </option>
+            ))}
+          </select>
+          <button type="button" className="secondary sm" onClick={add} disabled={!kind}>
+            <IconPlus size={14} /> Add room
           </button>
+          {!kind && <span className="muted small">Every kind of room is at its limit.</span>}
         </div>
-        <div className="actions">
-          <button type="button" disabled={busy} onClick={() => void save(false)}>
-            {doc.id ? "Save changes" : "Save base"}
-          </button>
-          {doc.id && (
-            <button type="button" className="secondary" disabled={busy} onClick={() => void save(true)}>
-              Save as new
-            </button>
-          )}
-          {doc.id && (
-            <button type="button" className="secondary danger" onClick={() => void remove()}>
-              Delete
-            </button>
-          )}
-        </div>
-        {message.error && <p className="error">{message.error}</p>}
-        {message.ok && <p className="muted">{message.ok}</p>}
       </div>
-      <div className="card">
-        <h2 className="card-title">On the floor plan</h2>
-        <BaseMap base={base} label="The base's rooms on the in-game floor plan" />
-      </div>
-    </div>
+    </section>
   );
 }
 
@@ -389,68 +400,85 @@ export function BaseView() {
   };
 
   return (
-    <div className="split wide-right">
-      <div className="stack">
-        <div className="card">
-          <h2 className="card-title">Stored bases</h2>
-          {error && <p className="error">{error}</p>}
-          {list && list.length === 0 && <p className="muted">None yet. Start from the example and save it.</p>}
-          <ul className="doc-list">
-            {list?.map((b) => (
-              <li key={b.id}>
-                <button
-                  type="button"
-                  className={b.id === editing?.id ? "doc on" : "doc"}
-                  onClick={() => open(b.id)}
-                  aria-current={b.id === editing?.id}
-                >
-                  <span>{b.name ?? "Untitled base"}</span>
-                  <span className="muted small">
-                    {b.id === active ? "in use · " : ""}
-                    {when(b.updated_at)}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          <div className="actions">
+    <>
+      <PageHeader title="Base" description="Your rooms: levels, what each Factory makes, what each Trading Post sells." />
+      <div className="with-sidebar narrow">
+        <section className="card">
+          <header className="card-head">
+            <h2 className="card-title">
+              Saved bases {list && list.length > 0 && <span className="count">{list.length}</span>}
+            </h2>
+          </header>
+          {error && (
+            <div className="card-body">
+              <Callout tone="error">{error}</Callout>
+            </div>
+          )}
+          {list && list.length === 0 && <p className="doc-empty">None yet. Start from the example and save it.</p>}
+          {list && list.length > 0 && (
+            <ul className="doc-list">
+              {list.map((b) => (
+                <li key={b.id}>
+                  <button
+                    type="button"
+                    className={b.id === editing?.id ? "doc on" : "doc"}
+                    onClick={() => open(b.id)}
+                    aria-current={b.id === editing?.id}
+                  >
+                    <span className="doc-name">
+                      <span>{b.name ?? "Untitled base"}</span>
+                      {b.id === active && <span className="badge accent">In use</span>}
+                    </span>
+                    <span className="doc-meta" title={when(b.updated_at)}>
+                      Updated {ago(b.updated_at)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="card-foot new-buttons">
             <button
               type="button"
-              className="secondary"
+              className="secondary sm full"
               onClick={() => setEditing({ key: `example-${Date.now()}`, name: "2-4-3 example", base: EXAMPLE_BASE })}
             >
-              New from the 2-4-3 example
+              <IconPlus size={14} /> New from the 2-4-3 example
             </button>
             <button
               type="button"
-              className="secondary"
+              className="ghost sm full"
               onClick={() => setEditing({ key: `empty-${Date.now()}`, name: "", base: EMPTY_BASE })}
             >
-              New empty base
+              <IconPlus size={14} /> New empty base
             </button>
           </div>
+        </section>
+        <div className="min0">
+          {editing ? (
+            <Editor
+              key={editing.key}
+              doc={editing}
+              active={editing.id !== undefined && editing.id === active}
+              onUse={() => editing.id && use(editing.id)}
+              onSaved={(id) => {
+                void refresh();
+                if (!active) use(id);
+                open(id);
+              }}
+              onDeleted={() => {
+                if (active === editing.id) use(null);
+                setEditing(null);
+                void refresh();
+              }}
+            />
+          ) : (
+            <p className="boot">
+              <span className="spinner" /> Loading…
+            </p>
+          )}
         </div>
       </div>
-      <div>
-        {editing && (
-          <Editor
-            key={editing.key}
-            doc={editing}
-            active={editing.id !== undefined && editing.id === active}
-            onUse={() => editing.id && use(editing.id)}
-            onSaved={(id) => {
-              void refresh();
-              if (!active) use(id);
-              open(id);
-            }}
-            onDeleted={() => {
-              if (active === editing.id) use(null);
-              setEditing(null);
-              void refresh();
-            }}
-          />
-        )}
-      </div>
-    </div>
+    </>
   );
 }

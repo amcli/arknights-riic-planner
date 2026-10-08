@@ -12,6 +12,7 @@ import {
   type OperatorSummary,
   type RoomType,
 } from "./api";
+import { Callout } from "./components/ui";
 import { errorText } from "./format";
 
 export interface GameData {
@@ -62,15 +63,18 @@ export function GameDataProvider({ children }: { children: ReactNode }) {
   }, []);
   if (state.error) {
     return (
-      <div className="card">
-        <p className="error">Could not reach the API ({state.error}).</p>
-        <p className="muted">
-          Start it with <code>cargo run -p ak-api</code>, then reload this page.
-        </p>
-      </div>
+      <Callout tone="error" title={`Could not reach the API (${state.error})`}>
+        Start it with <code>cargo run -p ak-api</code>, then reload this page.
+      </Callout>
     );
   }
-  if (!state.data) return <p className="muted">Loading game data…</p>;
+  if (!state.data) {
+    return (
+      <p className="boot">
+        <span className="spinner" /> Loading game data…
+      </p>
+    );
+  }
   return <Context.Provider value={state.data}>{children}</Context.Provider>;
 }
 

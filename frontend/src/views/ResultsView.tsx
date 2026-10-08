@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   api,
   type AssignmentMap,
+  type Breakdown,
   type Candidate,
   type DocumentMeta,
   type SimResult,
@@ -14,17 +15,15 @@ import {
   type SolveSummary,
   type Tagged,
 } from "../api";
-import { BaseMap, diffRoom } from "../components/BaseMap";
-import { MoraleTable } from "../components/MoraleTable";
+import { BaseMap, diffRoom, toneOf } from "../components/BaseMap";
+import { IconAlert, IconChevronLeft, IconPlus, IconResults, IconStop, IconTrash } from "../components/icons";
+import { MoraleTable, type MoraleView } from "../components/MoraleTable";
+import { Callout, Empty, PageHeader, Segmented, StatusBadge } from "../components/ui";
 import { useGameData } from "../data";
-import { change, compact, errorText, fmt, itemName, perDay, roomName, when } from "../format";
+import { ago, change, compact, errorText, fmt, itemName, perDay, roomName, short, when } from "../format";
 import { href } from "../router";
 
 const FINISHED = new Set(["done", "failed", "cancelled"]);
-
-function StatusBadge({ status }: { status: string }) {
-  return <span className={`badge status-${status}`}>{status}</span>;
-}
 
 export function ResultsView({ id }: { id?: string }) {
   return id ? <SolveDetail key={id} id={id} /> : <SolveList />;
@@ -49,45 +48,68 @@ function SolveList() {
   };
 
   return (
-    <div className="card">
-      <h2 className="card-title">Solves</h2>
-      {error && <p className="error">{error}</p>}
-      {list?.length === 0 && (
-        <p className="muted">
-          No solves yet. <a href={href("plan")}>Plan one</a>.
-        </p>
-      )}
-      {list && list.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Status</th>
-              <th>Started</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((s) => (
-              <tr key={s.id}>
-                <td>
-                  <a href={href("results", s.id)}>{s.name ?? s.id.slice(0, 8)}</a>
-                </td>
-                <td>
-                  <StatusBadge status={s.status} />
-                </td>
-                <td>{when(s.created_at)}</td>
-                <td>
-                  <button type="button" className="link" onClick={() => void remove(s)}>
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+    <>
+      <PageHeader
+        title="Results"
+        description="Every solve, with the best assignments it found and what they would produce."
+        actions={
+          <a className="button" href={href("plan")}>
+            <IconPlus size={14} /> New plan
+          </a>
+        }
+      />
+      <div className="stack">
+        {error && <Callout tone="error">{error}</Callout>}
+        <section className="card">
+          {list === null && !error && (
+            <p className="boot card-body">
+              <span className="spinner" /> Loading…
+            </p>
+          )}
+          {list?.length === 0 && (
+            <Empty icon={<IconResults size={20} />} title="No solves yet">
+              <a href={href("plan")}>Plan one</a>, and its results land here.
+            </Empty>
+          )}
+          {list && list.length > 0 && (
+            <div className="table-wrap">
+              <table className="solve-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {list.map((s) => (
+                    <tr key={s.id}>
+                      <td>
+                        <a href={href("results", s.id)}>{s.name ?? s.id.slice(0, 8)}</a>
+                      </td>
+                      <td>
+                        <StatusBadge status={s.status} />
+                      </td>
+                      <td className="muted nowrap" title={when(s.created_at)}>
+                        {ago(s.created_at)}
+                      </td>
+                      <td className="num">
+                        <button type="button" className="ghost danger sm" onClick={() => void remove(s)}>
+                          <IconTrash size={14} /> Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
+    </>
   );
 }
 
@@ -129,59 +151,105 @@ function SolveDetail({ id }: { id: string }) {
     }
   };
 
-  if (error) return <p className="error">{error}</p>;
-  if (!job) return <p className="muted">Loading…</p>;
+  const crumbs = (
+    <a href={href("results")}>
+      <IconChevronLeft size={14} /> All solves
+    </a>
+  );
+  if (error) {
+    return (
+      <>
+        <PageHeader crumbs={crumbs} title="Solve" />
+        <Callout tone="error">{error}</Callout>
+      </>
+    );
+  }
+  if (!job) {
+    return (
+      <p className="boot">
+        <span className="spinner" /> Loading…
+      </p>
+    );
+  }
   const refName = (ref?: string) => (ref ? (names.get(ref) ?? "a deleted document") : "given inline");
+  const rotation = job.request.rotation;
 
   return (
-    <div className="stack">
-      <div className="card">
-        <div className="card-head">
-          <div>
-            <p className="muted small">
-              <a href={href("results")}>All solves</a>
-            </p>
-            <h2 className="card-title">{job.name ?? "Solve"}</h2>
-          </div>
-          <StatusBadge status={job.status} />
-        </div>
-        <p className="muted">
-          Base: {refName(job.refs?.base_id)} · roster: {refName(job.refs?.roster_id)} · {fmt(job.request.config.horizon_hours)} h
-          horizon · {job.request.rotation.kind === "mood_threshold" ? "rotating tired operators" : "no rotation"} · started{" "}
-          {when(job.created_at)}
-        </p>
+    <>
+      <PageHeader
+        crumbs={crumbs}
+        title={
+          <>
+            {job.name ?? "Solve"} <StatusBadge status={job.status} />
+          </>
+        }
+        meta={
+          <ul className="meta-list">
+            <li>
+              Base <strong>{refName(job.refs?.base_id)}</strong>
+            </li>
+            <li>
+              Roster <strong>{refName(job.refs?.roster_id)}</strong>
+            </li>
+            <li>{fmt(job.request.config.horizon_hours)} h horizon</li>
+            <li>
+              {rotation.kind === "mood_threshold"
+                ? `rotating tired operators (rest at ${fmt(rotation.swap_out)}, back at ${fmt(rotation.swap_in)})`
+                : "no rotation"}
+            </li>
+            <li title={when(job.created_at)}>started {short(job.created_at)}</li>
+          </ul>
+        }
+      />
+      <div className="stack">
         {!FINISHED.has(job.status) && <Running job={job} onStop={() => void stop()} />}
-        {job.status === "failed" && <p className="error">The solve failed: {job.error ?? "unknown error"}</p>}
-        {job.status === "cancelled" && (
-          <p className="muted">
-            Cancelled before it started. <a href={href("plan")}>Plan again</a>.
-          </p>
+        {job.status === "failed" && (
+          <Callout tone="error" title="The solve failed">
+            {job.error ?? "unknown error"}
+          </Callout>
         )}
+        {job.status === "cancelled" && (
+          <Callout title="Cancelled before it started">
+            <a href={href("plan")}>Plan again</a>.
+          </Callout>
+        )}
+        {job.status === "done" && job.result && <Finished job={job} />}
       </div>
-      {job.status === "done" && job.result && <Finished job={job} />}
-    </div>
+    </>
   );
 }
 
 function Running({ job, onStop }: { job: SolveJob; onStop: () => void }) {
   const p = job.progress;
   const budget = Number(job.request.solver.time_budget_ms ?? 0);
+  const title =
+    job.status === "pending"
+      ? "Waiting for a free slot on the server…"
+      : p?.phase === "rescoring"
+        ? "Re-scoring the finalists"
+        : "Searching";
   return (
-    <div className="running">
-      {job.status === "pending" && <p>Waiting for a free slot on the server…</p>}
-      {p && <ProgressBar p={p} />}
-      {p && (
-        <p className="muted small">
-          {describe(p)}
-          {budget > 0 && p.phase === "searching" && <> · stops by {fmt(budget / 1000)} s</>}
-        </p>
-      )}
-      <div className="actions">
-        <button type="button" className="secondary" onClick={onStop} disabled={job.stop_requested === true}>
-          {job.status === "pending" ? "Cancel" : job.stop_requested ? "Stopping…" : "Stop and keep the best so far"}
-        </button>
+    <section className="card">
+      <div className="card-body">
+        <div className="run-head">
+          <span className="spinner" />
+          <strong>{title}</strong>
+          {p && p.total > 0 && <span className="muted small">{fmt(Math.min(100, (100 * p.done) / p.total))}%</span>}
+          <button type="button" className="secondary sm push" onClick={onStop} disabled={job.stop_requested === true}>
+            <IconStop size={13} />
+            {job.status === "pending" ? "Cancel" : job.stop_requested ? "Stopping…" : "Stop and keep the best so far"}
+          </button>
+        </div>
+        {/* Keyed by phase so re-scoring starts a fresh bar instead of sliding back. */}
+        {p && <ProgressBar key={p.phase} p={p} />}
+        {p && (
+          <p className="muted small">
+            {describe(p)}
+            {budget > 0 && p.phase === "searching" && <> · stops by {fmt(budget / 1000)} s</>}
+          </p>
+        )}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -205,11 +273,20 @@ function ProgressBar({ p }: { p: SolveProgress }) {
 
 type Baseline = "none" | "best" | "start";
 
+/** Per-day outputs a finalist's summary line can show, in order. */
+const OUTPUTS: { key: keyof Breakdown; unit: string }[] = [
+  { key: "lmd", unit: "LMD" },
+  { key: "exp", unit: "EXP" },
+  { key: "orundum", unit: "Orundum" },
+  { key: "drones", unit: "drones" },
+];
+
 function Finished({ job }: { job: SolveJob }) {
   const data = useGameData();
   const result = job.result;
   const [selected, setSelected] = useState(0);
   const [baseline, setBaseline] = useState<Baseline>("best");
+  const [moraleView, setMoraleView] = useState<MoraleView>("chart");
   const [sims, setSims] = useState<Map<number, SimResult>>(() =>
     result?.best_simulation ? new Map([[0, result.best_simulation]]) : new Map(),
   );
@@ -227,7 +304,7 @@ function Finished({ job }: { job: SolveJob }) {
   if (!result) return null;
   const horizon = job.request.config.horizon_hours;
   const candidate = result.candidates[selected] ?? result.candidates[0];
-  if (!candidate) return <p className="muted">The solve returned no finalists.</p>;
+  if (!candidate) return <Callout>The solve returned no finalists.</Callout>;
   const best = result.candidates[0] ?? candidate;
   const startEmpty = Object.values(result.initial.assignment).every((slots) => slots.every((s) => s === null));
   const against: AssignmentMap | undefined =
@@ -235,96 +312,84 @@ function Finished({ job }: { job: SolveJob }) {
   const sim = sims.get(selected);
   const base = job.request.base;
 
+  // A finalist's outputs per day, naming only what any finalist makes.
+  const everyone = [...result.candidates, result.initial];
+  const outputs = OUTPUTS.filter((o) => everyone.some((c) => c.breakdown[o.key] > 0));
+  const summary = (c: Candidate) => {
+    const parts = outputs.map((o) => `${compact(perDay(c.breakdown[o.key], horizon))} ${o.unit}`);
+    if (c.breakdown.exhausted_hours > 0) parts.push(`${fmt(c.breakdown.exhausted_hours, 1)} h exhausted in all`);
+    return parts.length > 0 ? parts.join(" · ") : "nothing made";
+  };
+
   return (
     <>
-      {/* Two columns: choosing a finalist on the left, what it looks like on
-          the right (wider, for the map). */}
-      <div className="split results">
-        <div className="stack">
-          <div className="card">
-            {result.stopped && (
-              <p className="warn">
-                The search was {result.stopped === "time_budget" ? "cut off by its time budget" : "stopped on request"}; these
-                are the best found until then.
-              </p>
-            )}
-            <Tiles c={candidate} reference={selected === 0 ? result.initial : best} referenceLabel={selected === 0 ? "the start" : "the best"} horizon={horizon} />
-            <p className="muted small">
-              {result.strategy === "exhaustive" ? "Exhaustive search" : "Simulated annealing"} over {result.space.variable_slots} slots and{" "}
-              {result.space.pool} operators (about {result.space.estimated_size.toExponential(1)} arrangements): {fmt(result.evaluations)}{" "}
-              quick evaluations, {fmt(result.simulations)} full simulations, {fmt(result.elapsed_ms / 1000, 1)} s. Per-day figures
-              are the {fmt(horizon)} h totals scaled to 24 h.
-            </p>
-          </div>
+      {result.stopped && (
+        <Callout tone="warn">
+          The search was {result.stopped === "time_budget" ? "cut off by its time budget" : "stopped on request"}; these are
+          the best found until then.
+        </Callout>
+      )}
 
-          <div className="card">
-            <h2 className="card-title">Finalists</h2>
-            <div className="table-scroll">
-              <table className="finalists compact-rows">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th className="num">Score</th>
-                    <th className="num">vs best</th>
-                    <th className="num">LMD / day</th>
-                    <th className="num">EXP / day</th>
-                    <th className="num">Orundum / day</th>
-                    <th className="num">Drones / day</th>
-                    <th className="num">Exhausted h</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.candidates.map((c, i) => (
-                    <tr key={i} className={i === selected ? "selected" : undefined}>
-                      <td>
-                        <button type="button" className="link" onClick={() => setSelected(i)} aria-pressed={i === selected}>
-                          {i === 0 ? "Best" : `#${i + 1}`}
-                        </button>
-                      </td>
-                      <td className="num">{fmt(c.score)}</td>
-                      <td className="num">{i === 0 ? "" : change(c.score, best.score)}</td>
-                      <td className="num">{fmt(perDay(c.breakdown.lmd, horizon))}</td>
-                      <td className="num">{fmt(perDay(c.breakdown.exp, horizon))}</td>
-                      <td className="num">{fmt(perDay(c.breakdown.orundum, horizon))}</td>
-                      <td className="num">{fmt(perDay(c.breakdown.drones, horizon))}</td>
-                      <td className="num">{fmt(c.breakdown.exhausted_hours, 1)}</td>
-                    </tr>
-                  ))}
-                  <tr className="reference">
-                    <td>Start</td>
-                    <td className="num">{fmt(result.initial.score)}</td>
-                    <td className="num">{change(result.initial.score, best.score)}</td>
-                    <td className="num">{fmt(perDay(result.initial.breakdown.lmd, horizon))}</td>
-                    <td className="num">{fmt(perDay(result.initial.breakdown.exp, horizon))}</td>
-                    <td className="num">{fmt(perDay(result.initial.breakdown.orundum, horizon))}</td>
-                    <td className="num">{fmt(perDay(result.initial.breakdown.drones, horizon))}</td>
-                    <td className="num">{fmt(result.initial.breakdown.exhausted_hours, 1)}</td>
-                  </tr>
-                </tbody>
-              </table>
+      <section className="card">
+        <Tiles
+          c={candidate}
+          reference={selected === 0 ? result.initial : best}
+          referenceLabel={selected === 0 ? "the start" : "the best"}
+          horizon={horizon}
+        />
+        <p className="card-foot muted small">
+          {result.strategy === "exhaustive" ? "Exhaustive search" : "Simulated annealing"} over {result.space.variable_slots} slots and{" "}
+          {result.space.pool} operators (about {result.space.estimated_size.toExponential(1)} arrangements): {fmt(result.evaluations)}{" "}
+          quick evaluations, {fmt(result.simulations)} full simulations, {fmt(result.elapsed_ms / 1000, 1)} s. Per-day figures are
+          the {fmt(horizon)} h totals scaled to 24 h.
+        </p>
+      </section>
+
+      <section className="card">
+        <header className="card-head">
+          <h2 className="card-title">{selected === 0 ? "Best assignment" : `Finalist #${selected + 1}`}</h2>
+          <label className="inline">
+            <span>Mark changes against</span>
+            <select value={baseline} onChange={(e) => setBaseline(e.target.value as Baseline)}>
+              <option value="best">the best</option>
+              <option value="start" disabled={startEmpty}>
+                the start
+              </option>
+              <option value="none">nothing</option>
+            </select>
+          </label>
+        </header>
+        <div className="assignment-body">
+          <div className="finalists-pane">
+            <div className="section-label">
+              Finalists <span className="label-note">outputs per day</span>
             </div>
-            <p className="muted small">
+            <ul className="finalists">
+              {result.candidates.map((c, i) => (
+                <li key={i}>
+                  <button type="button" className="finalist" aria-pressed={i === selected} onClick={() => setSelected(i)}>
+                    <span className="finalist-rank">{i === 0 ? "Best" : `#${i + 1}`}</span>
+                    <span className="finalist-score">{fmt(c.score)}</span>
+                    <span className="finalist-delta">{i === 0 ? "" : change(c.score, best.score)}</span>
+                    <span className="finalist-line">{summary(c)}</span>
+                  </button>
+                </li>
+              ))}
+              <li>
+                <div className="finalist reference">
+                  <span className="finalist-rank">Start</span>
+                  <span className="finalist-score">{fmt(result.initial.score)}</span>
+                  <span className="finalist-delta">{change(result.initial.score, best.score)}</span>
+                  <span className="finalist-line">{summary(result.initial)}</span>
+                </div>
+              </li>
+            </ul>
+            <p className="tiny muted">
               Finalists have distinct scores, so each is a real trade-off. The start is what the solve began from
               {startEmpty ? " (an empty base, since nothing was pinned)" : " (the pinned operators)"}.
             </p>
           </div>
-        </div>
-
-        <div className="stack">
-          <div className="card">
-            <div className="card-head">
-              <h2 className="card-title">{selected === 0 ? "Best assignment" : `Finalist #${selected + 1}`}</h2>
-              <label className="inline">
-                <span className="small muted">Mark changes against</span>
-                <select value={baseline} onChange={(e) => setBaseline(e.target.value as Baseline)}>
-                  <option value="best">the best</option>
-                  <option value="start" disabled={startEmpty}>
-                    the start
-                  </option>
-                  <option value="none">nothing</option>
-                </select>
-              </label>
-            </div>
+          <div className="map-pane">
             <BaseMap
               base={base}
               assignment={candidate.assignment}
@@ -333,54 +398,105 @@ function Finished({ job }: { job: SolveJob }) {
             />
             {against && <Changes base={base} now={candidate.assignment} before={against} />}
           </div>
+        </div>
+      </section>
 
-          <div className="card">
+      {/* What each room makes, with the model's caveats beside it when there are any. */}
+      <div className={sim && sim.warnings.length > 0 ? "results-lower" : undefined}>
+        <section className="card">
+          <header className="card-head">
             <h2 className="card-title">Rooms, per day</h2>
-            {simError && <p className="error">{simError}</p>}
-            {!sim && !simError && <p className="muted">Simulating…</p>}
-            {sim && <RoomTable sim={sim} horizon={horizon} name={data.name} />}
+          </header>
+          {simError && (
+            <div className="card-body">
+              <Callout tone="error">{simError}</Callout>
+            </div>
+          )}
+          {!sim && !simError && (
+            <p className="boot card-body">
+              <span className="spinner" /> Simulating…
+            </p>
+          )}
+          {sim && <RoomTable sim={sim} horizon={horizon} />}
+        </section>
+
+        {sim && sim.warnings.length > 0 && (
+          <details className="card model-notes" open={sim.warnings.length <= 6}>
+            <summary>
+              <IconAlert size={15} className="warn" /> What the model could not honour{" "}
+              <span className="count">{sim.warnings.length}</span>
+            </summary>
+            <div className="card-body">
+              <ul className="notes">
+                {sim.warnings.map((w, i) => (
+                  <li key={i}>{describeWarning(w, data.name)}</li>
+                ))}
+              </ul>
+            </div>
+          </details>
+        )}
+      </div>
+
+      <section className="card">
+        <header className="card-head">
+          <div className="min0">
+            <h2 className="card-title">Morale</h2>
+            <p className="card-sub">0 to 24 over {fmt(horizon)} h, by the room each operator starts in</p>
           </div>
+          <Segmented
+            name="morale-view"
+            label="Morale view"
+            value={moraleView}
+            options={[
+              { value: "chart", label: "Chart" },
+              { value: "table", label: "Table" },
+            ]}
+            onChange={setMoraleView}
+          />
+        </header>
+        <div className="card-body">
+          {sim ? (
+            <MoraleTable sim={sim} base={base} assignment={candidate.assignment} view={moraleView} />
+          ) : (
+            <p className="boot">
+              <span className="spinner" /> Simulating…
+            </p>
+          )}
         </div>
-      </div>
-
-      <div className="card">
-        <h2 className="card-title">Morale</h2>
-        {sim ? <MoraleTable sim={sim} base={base} assignment={candidate.assignment} /> : <p className="muted">Simulating…</p>}
-      </div>
-
-      {sim && sim.warnings.length > 0 && (
-        <div className="card">
-          <h2 className="card-title">What the model could not honour ({sim.warnings.length})</h2>
-          <ul className="warnings">
-            {sim.warnings.map((w, i) => (
-              <li key={i}>{describeWarning(w, data.name)}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+      </section>
     </>
   );
 }
 
 function Tiles({ c, reference, referenceLabel, horizon }: { c: Candidate; reference: Candidate; referenceLabel: string; horizon: number }) {
+  const day = (b: Breakdown, key: keyof Breakdown) => perDay(b[key], horizon);
   const tiles = [
-    { label: "Score", value: c.score, before: reference.score, perDay: false },
-    { label: "LMD per day", value: perDay(c.breakdown.lmd, horizon), before: perDay(reference.breakdown.lmd, horizon), perDay: true },
-    { label: "EXP per day", value: perDay(c.breakdown.exp, horizon), before: perDay(reference.breakdown.exp, horizon), perDay: true },
-    { label: "Orundum per day", value: perDay(c.breakdown.orundum, horizon), before: perDay(reference.breakdown.orundum, horizon), perDay: true },
-    { label: "Drones per day", value: perDay(c.breakdown.drones, horizon), before: perDay(reference.breakdown.drones, horizon), perDay: true },
-  ].filter((t) => t.label === "Score" || t.value > 0 || t.before > 0);
+    { label: "Score", value: c.score, before: reference.score, always: true, upIsGood: true },
+    { label: "LMD per day", value: day(c.breakdown, "lmd"), before: day(reference.breakdown, "lmd"), upIsGood: true },
+    { label: "EXP per day", value: day(c.breakdown, "exp"), before: day(reference.breakdown, "exp"), upIsGood: true },
+    { label: "Orundum per day", value: day(c.breakdown, "orundum"), before: day(reference.breakdown, "orundum"), upIsGood: true },
+    { label: "Drones per day", value: day(c.breakdown, "drones"), before: day(reference.breakdown, "drones"), upIsGood: true },
+    {
+      label: "Hours exhausted",
+      value: c.breakdown.exhausted_hours,
+      before: reference.breakdown.exhausted_hours,
+      upIsGood: false,
+    },
+  ].filter((t) => t.always || t.value > 0 || t.before > 0);
   return (
-    <div className="tiles">
+    <div className="kpis">
       {tiles.map((t) => {
         const up = t.value > t.before + 1e-9;
         const down = t.value < t.before - 1e-9;
+        const good = (up && t.upIsGood) || (down && !t.upIsGood);
+        const bad = (down && t.upIsGood) || (up && !t.upIsGood);
         return (
-          <div key={t.label} className="tile">
-            <span className="tile-label">{t.label}</span>
-            <span className="tile-value">{compact(t.value)}</span>
-            <span className={`tile-delta ${up ? "up" : down ? "down" : ""}`}>
-              {up ? "▲" : down ? "▼" : "="} {change(t.value, t.before)} <span className="nowrap">vs {referenceLabel}</span>
+          <div key={t.label} className="kpi">
+            <span className="kpi-label">{t.label}</span>
+            <span className="kpi-value">{compact(t.value)}</span>
+            <span className={`kpi-delta ${good ? "up" : bad ? "down" : ""}`}>
+              <span aria-hidden="true">{up ? "▲" : down ? "▼" : "="}</span>
+              {change(t.value, t.before)} <span className="vs">vs {referenceLabel}</span>
             </span>
           </div>
         );
@@ -394,23 +510,29 @@ function Changes({ base, now, before }: { base: SolveJob["request"]["base"]; now
   const rows = base.rooms
     .map((room) => ({ room, ...diffRoom(room.id, now, before) }))
     .filter((r) => r.added.length > 0 || r.removed.length > 0);
-  if (rows.length === 0) return <p className="muted">No changes.</p>;
+  if (rows.length === 0) return <p className="muted small">No changes.</p>;
   return (
-    <ul className="changes">
-      {rows.map(({ room, added, removed }) => (
-        <li key={room.id}>
-          <strong>
-            {roomName(room.kind)} {room.id}
-          </strong>
-          {added.length > 0 && <span className="added"> + {added.map(name).join(", ")}</span>}
-          {removed.length > 0 && <span className="removed"> − {removed.map(name).join(", ")}</span>}
-        </li>
-      ))}
-    </ul>
+    <div>
+      <div className="section-label">
+        Changes <span className="count">{rows.length}</span>
+      </div>
+      <ul className="changes">
+        {rows.map(({ room, added, removed }) => (
+          <li key={room.id}>
+            <span className="room">
+              {roomName(room.kind)} <span className="id">{room.id}</span>
+            </span>
+            {added.length > 0 && <span className="added"> + {added.map(name).join(", ")}</span>}
+            {removed.length > 0 && <span className="removed"> − {removed.map(name).join(", ")}</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
-function RoomTable({ sim, horizon, name }: { sim: SimResult; horizon: number; name: (id: string) => string }) {
+function RoomTable({ sim, horizon }: { sim: SimResult; horizon: number }) {
+  const { name, facilities } = useGameData();
   const day = (v: number) => perDay(v, horizon);
   const output = (r: SimResult["rooms"][number]) => {
     const parts: string[] = [];
@@ -427,8 +549,8 @@ function RoomTable({ sim, horizon, name }: { sim: SimResult; horizon: number; na
   // Workshop show up in the morale table instead.
   const rows = sim.rooms.filter((r) => r.average_stat_pct !== null);
   return (
-    <div className="table-scroll">
-      <table>
+    <div className="table-wrap">
+      <table className="dense">
         <thead>
           <tr>
             <th>Room</th>
@@ -440,13 +562,16 @@ function RoomTable({ sim, horizon, name }: { sim: SimResult; horizon: number; na
         <tbody>
           {rows.map((r) => (
             <tr key={r.id}>
-              <td>
-                {roomName(r.kind)} <code className="muted">{r.id}</code>
+              <td className="nowrap">
+                <span className="room-cell">
+                  <span className={`swatch ${toneOf(r.kind, facilities)}`} aria-hidden="true" />
+                  {roomName(r.kind)} <span className="id">{r.id}</span>
+                </span>
               </td>
               <td className="num">{r.average_stat_pct === null ? "" : `${fmt(r.average_stat_pct)}%`}</td>
-              <td>
+              <td className="output-cell">
                 {output(r) || <span className="muted">nothing</span>}
-                {r.hours_blocked > 0 && <span className="warn small"> · full for {fmt(r.hours_blocked, 1)} h</span>}
+                {r.hours_blocked > 0 && <span className="blocked"> · full for {fmt(r.hours_blocked, 1)} h</span>}
               </td>
               <td>{r.operators.map(name).join(", ")}</td>
             </tr>

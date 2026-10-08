@@ -11,8 +11,20 @@ import {
   type RosterSource,
   type RosterView,
 } from "../api";
+import {
+  IconAlert,
+  IconCheck,
+  IconDownload,
+  IconFile,
+  IconRoster,
+  IconSave,
+  IconSearch,
+  IconTrash,
+  IconUpload,
+} from "../components/icons";
+import { Callout, Empty, PageHeader, Segmented } from "../components/ui";
 import { useGameData } from "../data";
-import { errorText, fmt, professionName, promotion, when } from "../format";
+import { ago, errorText, fmt, professionName, promotion, when } from "../format";
 import { EXAMPLE_ROSTER } from "../presets";
 import { recall, remember } from "../storage";
 
@@ -29,10 +41,14 @@ const SOURCES: { id: RosterSource; label: string; help: string }[] = [
   },
   {
     id: "manual",
-    label: "Canonical JSON",
+    label: "JSON",
     help: "{ operator id: { promotion: { phase: \"PHASE_2\", level: 90 } } }, the shape requests use. Every id must be in the game data.",
   },
 ];
+
+type Phase = Roster[string]["promotion"]["phase"];
+const PHASES: Phase[] = ["PHASE_2", "PHASE_1", "PHASE_0"];
+const eliteName = (p: Phase) => p.replace("PHASE_", "Elite ");
 
 /** Reads pasted text, unwrapping a value that was copied as a JSON string. */
 function parsePasted(text: string): unknown {
@@ -56,37 +72,50 @@ export function describeWarning(w: ImportWarning, name: (id: string) => string):
   }
 }
 
-function byPromotion(roster: Roster): string {
-  const counts = new Map<string, number>();
-  for (const e of Object.values(roster)) {
-    const key = e.promotion.phase.replace("PHASE_", "Elite ");
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return [...counts]
-    .sort(([a], [b]) => b.localeCompare(a))
-    .map(([k, n]) => `${k}: ${n}`)
-    .join(" · ");
+function countByPhase(roster: Roster): Map<Phase, number> {
+  const counts = new Map<Phase, number>();
+  for (const e of Object.values(roster)) counts.set(e.promotion.phase, (counts.get(e.promotion.phase) ?? 0) + 1);
+  return counts;
 }
 
-function ReportView({ report, name }: { report: ImportReport; name: (id: string) => string }) {
+function PromotionStats({ roster }: { roster: Roster }) {
+  const counts = countByPhase(roster);
   return (
-    <>
-      <p>
-        Read {fmt(report.entries)} entries: <strong>{fmt(report.imported)} imported</strong>
-        {report.not_owned > 0 && <>, {fmt(report.not_owned)} not owned</>}
-        {report.warnings.length > 0 && <>, {fmt(report.warnings.length)} to check</>}.
-        <span className="muted"> Format: {report.format.replaceAll("_", " ")}.</span>
-      </p>
-      {report.warnings.length > 0 && (
-        <ul className="warnings">
-          {report.warnings.map((w, i) => (
-            <li key={i} className="warn">
-              {describeWarning(w, name)}
-            </li>
-          ))}
-        </ul>
-      )}
-    </>
+    <div className="promo-stats">
+      {PHASES.filter((p) => counts.has(p)).map((p) => (
+        <span key={p}>
+          {eliteName(p)} <strong>{fmt(counts.get(p) ?? 0)}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ReportSummary({ report }: { report: ImportReport }) {
+  return (
+    <span>
+      Read {fmt(report.entries)} entries: <strong>{fmt(report.imported)} imported</strong>
+      {report.not_owned > 0 && <>, {fmt(report.not_owned)} not owned</>}
+      {report.warnings.length > 0 && <>, {fmt(report.warnings.length)} to check</>}.
+      <span className="muted"> Format: {report.format.replaceAll("_", " ")}.</span>
+    </span>
+  );
+}
+
+function ReportWarnings({ report, name, open }: { report: ImportReport; name: (id: string) => string; open?: boolean }) {
+  const n = report.warnings.length;
+  if (n === 0) return null;
+  return (
+    <details className="hint" open={open}>
+      <summary>
+        <IconAlert size={13} className="warn" /> {fmt(n)} {n === 1 ? "entry" : "entries"} to check
+      </summary>
+      <ul className="notes">
+        {report.warnings.map((w, i) => (
+          <li key={i}>{describeWarning(w, name)}</li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -162,102 +191,112 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
     );
   };
 
+  const empty = !text.trim();
+
   return (
-    <div className="card">
-      <h2 className="card-title">Import a roster</h2>
-      <fieldset className="segmented" aria-label="Export format">
-        {SOURCES.map((s) => (
-          <label key={s.id} className={source === s.id ? "on" : undefined}>
-            <input
-              type="radio"
-              name="source"
-              value={s.id}
-              checked={source === s.id}
-              onChange={() => {
-                setSource(s.id);
-                setPreview(null);
-                setError(null);
-              }}
-            />
-            {s.label}
-          </label>
-        ))}
-      </fieldset>
-      <p className="muted small">{help}</p>
-      {source === "krooster" && (
-        <form
-          className="row"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void fetchKrooster();
+    <section className="card">
+      <header className="card-head">
+        <h2 className="card-title">
+          <IconUpload /> Import a roster
+        </h2>
+      </header>
+      <div className="card-body stack-sm">
+        <Segmented
+          name="source"
+          label="Export format"
+          full
+          value={source}
+          options={SOURCES.map((s) => ({ value: s.id, label: s.label }))}
+          onChange={(v) => {
+            setSource(v);
+            setPreview(null);
+            setError(null);
           }}
-        >
-          <input
-            type="text"
-            value={username}
-            placeholder="Krooster username"
-            aria-label="Krooster username"
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(e) => setUsername(e.target.value)}
-          />
-          <button type="submit" disabled={busy || !username.trim()}>
-            Fetch roster
-          </button>
-        </form>
-      )}
-      <textarea
-        className="request"
-        rows={8}
-        value={text}
-        spellCheck={false}
-        placeholder="Paste the export here, or choose a file below."
-        aria-label="Roster export"
-        onChange={(e) => {
-          setText(e.target.value);
-          setPreview(null);
-        }}
-      />
-      <div className="row">
-        <input type="file" accept=".json,.txt,application/json" onChange={(e) => loadFile(e.target.files?.[0])} />
-        {source === "manual" && (
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => {
-              setText(JSON.stringify(EXAMPLE_ROSTER, null, 2));
-              setLabel("Example roster");
-              setPreview(null);
+        />
+        <details className="hint">
+          <summary>Where to find it</summary>
+          <p>{help}</p>
+        </details>
+        {source === "krooster" && (
+          <form
+            className="row nowrap"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void fetchKrooster();
             }}
           >
-            Use the example roster
+            <input
+              className="grow"
+              type="text"
+              value={username}
+              placeholder="Krooster username"
+              aria-label="Krooster username"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+            <button type="submit" className="secondary" disabled={busy || !username.trim()}>
+              <IconDownload size={14} /> Fetch
+            </button>
+          </form>
+        )}
+        <textarea
+          className="mono"
+          rows={4}
+          value={text}
+          spellCheck={false}
+          placeholder={source === "krooster" ? "…or paste an export here" : "Paste the export here"}
+          aria-label="Roster export"
+          onChange={(e) => {
+            setText(e.target.value);
+            setPreview(null);
+          }}
+        />
+        <div className="row">
+          <label className="file-btn sm">
+            <IconFile size={14} /> Choose a file
+            <input type="file" accept=".json,.txt,application/json" onChange={(e) => loadFile(e.target.files?.[0])} />
+          </label>
+          {source === "manual" && (
+            <button
+              type="button"
+              className="ghost sm"
+              onClick={() => {
+                setText(JSON.stringify(EXAMPLE_ROSTER, null, 2));
+                setLabel("Example roster");
+                setPreview(null);
+              }}
+            >
+              Use the example roster
+            </button>
+          )}
+        </div>
+        <label className="field">
+          <span className="field-label">Name</span>
+          <input type="text" value={label} placeholder="My roster" onChange={(e) => setLabel(e.target.value)} />
+        </label>
+        <div className="row end">
+          <button type="button" className="secondary" disabled={busy || empty} onClick={() => void run(false)}>
+            Preview
           </button>
+          <button type="button" disabled={busy || empty} onClick={() => void run(true)}>
+            <IconSave size={14} /> Save roster
+          </button>
+        </div>
+        {error && <Callout tone="error">{error}</Callout>}
+        {preview && (
+          <div className="import-preview">
+            <span className="ok">
+              <IconCheck size={14} />
+              {fmt(Object.keys(preview.roster).length)} operators ready to save
+            </span>
+            {preview.import && <ReportSummary report={preview.import} />}
+            <PromotionStats roster={preview.roster} />
+            {preview.import && <ReportWarnings report={preview.import} name={name} open />}
+          </div>
         )}
       </div>
-      <label className="field">
-        <span>Name</span>
-        <input type="text" value={label} placeholder="My roster" onChange={(e) => setLabel(e.target.value)} />
-      </label>
-      <div className="actions">
-        <button type="button" className="secondary" disabled={busy || !text.trim()} onClick={() => void run(false)}>
-          Preview
-        </button>
-        <button type="button" disabled={busy || !text.trim()} onClick={() => void run(true)}>
-          Save roster
-        </button>
-      </div>
-      {error && <p className="error">{error}</p>}
-      {preview && (
-        <div className="preview">
-          {preview.import ? (
-            <ReportView report={preview.import} name={name} />
-          ) : (
-            <p>{fmt(Object.keys(preview.roster).length)} operators.</p>
-          )}
-          <p className="muted">{byPromotion(preview.roster)}</p>
-        </div>
-      )}
-    </div>
+    </section>
   );
 }
 
@@ -266,6 +305,7 @@ function RosterDetail({ id, active, onUse, onDeleted }: { id: string; active: bo
   const [doc, setDoc] = useState<(DocumentMeta & RosterView) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [phase, setPhase] = useState<Phase | "all">("all");
 
   useEffect(() => {
     setDoc(null);
@@ -273,13 +313,31 @@ function RosterDetail({ id, active, onUse, onDeleted }: { id: string; active: bo
     api.rosters.get(id).then(setDoc, (err: unknown) => setError(errorText(err)));
   }, [id]);
 
-  if (error) return <p className="error">{error}</p>;
-  if (!doc) return <p className="muted">Loading…</p>;
+  if (error) return <Callout tone="error">{error}</Callout>;
+  if (!doc) {
+    return (
+      <section className="card">
+        <p className="boot card-body">
+          <span className="spinner" /> Loading…
+        </p>
+      </section>
+    );
+  }
+
   const q = query.trim().toLowerCase();
-  const rows = Object.entries(doc.roster)
-    .map(([opId, entry]) => ({ opId, entry, op: data.operators.get(opId) }))
+  const all = Object.entries(doc.roster).map(([opId, entry]) => ({ opId, entry, op: data.operators.get(opId) }));
+  const counts = countByPhase(doc.roster);
+  const rows = all
+    .filter(({ entry }) => phase === "all" || entry.promotion.phase === phase)
     .filter(({ opId, op }) => !q || opId.includes(q) || (op?.name.toLowerCase().includes(q) ?? false))
-    .sort((a, b) => (b.op?.stars ?? 0) - (a.op?.stars ?? 0) || (a.op?.name ?? a.opId).localeCompare(b.op?.name ?? b.opId));
+    .sort((a, b) => (a.op?.name ?? a.opId).localeCompare(b.op?.name ?? b.opId));
+  // Grouped by rarity, highest first; ids the data lacks come last.
+  const groups = new Map<number, typeof rows>();
+  for (const r of rows) {
+    const stars = r.op?.stars ?? 0;
+    groups.set(stars, [...(groups.get(stars) ?? []), r]);
+  }
+  const ordered = [...groups].sort(([a], [b]) => b - a);
 
   const remove = async () => {
     if (!window.confirm(`Delete the roster "${doc.name ?? doc.id}"? This cannot be undone.`)) return;
@@ -292,55 +350,87 @@ function RosterDetail({ id, active, onUse, onDeleted }: { id: string; active: bo
   };
 
   return (
-    <div className="card">
-      <div className="card-head">
-        <h2 className="card-title">{doc.name ?? "Untitled roster"}</h2>
-        <div className="actions tight">
-          {active ? (
-            <span className="badge">Used for planning</span>
-          ) : (
-            <button type="button" onClick={onUse}>
-              Use for planning
+    <section className="card">
+      <header className="card-head">
+        <div className="min0">
+          <h2 className="card-title lg">
+            {doc.name ?? "Untitled roster"}
+            {active && <span className="badge accent dot">Used for planning</span>}
+          </h2>
+          <p className="card-sub">
+            {fmt(all.length)} operators · from {doc.source} · updated{" "}
+            <span title={when(doc.updated_at)}>{ago(doc.updated_at)}</span>
+          </p>
+        </div>
+        <div className="row">
+          {!active && (
+            <button type="button" className="sm" onClick={onUse}>
+              <IconCheck size={14} /> Use for planning
             </button>
           )}
-          <button type="button" className="secondary danger" onClick={() => void remove()}>
-            Delete
+          <button type="button" className="ghost danger sm" onClick={() => void remove()}>
+            <IconTrash size={14} /> Delete
           </button>
         </div>
+      </header>
+      <div className="card-body">
+        {doc.import && (
+          <div className="import-note">
+            <ReportSummary report={doc.import} />
+            <ReportWarnings report={doc.import} name={data.name} />
+          </div>
+        )}
+        <div className="toolbar">
+          <div className="search">
+            <IconSearch size={14} />
+            <input
+              type="search"
+              placeholder="Filter by name or id"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Filter operators"
+            />
+          </div>
+          <div className="chips" role="group" aria-label="Promotion">
+            <button type="button" className="chip" aria-pressed={phase === "all"} onClick={() => setPhase("all")}>
+              All <span className="n">{fmt(all.length)}</span>
+            </button>
+            {PHASES.filter((p) => counts.has(p)).map((p) => (
+              <button key={p} type="button" className="chip" aria-pressed={phase === p} onClick={() => setPhase(p)}>
+                {eliteName(p)} <span className="n">{fmt(counts.get(p) ?? 0)}</span>
+              </button>
+            ))}
+          </div>
+          {(q || phase !== "all") && <span className="muted small push">{fmt(rows.length)} shown</span>}
+        </div>
+        {rows.length === 0 ? (
+          <Empty title="No operators match">Try another name, or show every promotion.</Empty>
+        ) : (
+          <div className="op-groups">
+            {ordered.map(([stars, list]) => (
+              <section key={stars}>
+                <h3 className="op-group-head">
+                  {stars > 0 ? `${stars}★` : "Not in the game data"} <span className="count">{list.length}</span>
+                </h3>
+                <ul className="op-grid">
+                  {list.map(({ opId, entry, op }) => (
+                    <li
+                      key={opId}
+                      className="op"
+                      title={`${op?.name ?? opId} (${opId})${op ? ` · ${professionName(op.profession)}` : ""} · ${promotion(entry)}`}
+                    >
+                      <span className="op-name">{op?.name ?? opId}</span>
+                      {op && <span className="op-class">{professionName(op.profession)}</span>}
+                      <span className={`promo e${entry.promotion.phase.slice(-1)}`}>{promotion(entry)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        )}
       </div>
-      <p className="muted">
-        {fmt(Object.keys(doc.roster).length)} operators · from {doc.source} · updated {when(doc.updated_at)}
-      </p>
-      <p className="muted">{byPromotion(doc.roster)}</p>
-      {doc.import && <ReportView report={doc.import} name={data.name} />}
-      <input
-        type="search"
-        placeholder="Filter by name or id"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        aria-label="Filter operators"
-      />
-      <table className="compact-rows">
-        <thead>
-          <tr>
-            <th>Operator</th>
-            <th>★</th>
-            <th>Class</th>
-            <th>Promotion</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(({ opId, entry, op }) => (
-            <tr key={opId}>
-              <td title={opId}>{op?.name ?? opId}</td>
-              <td>{op?.stars ?? ""}</td>
-              <td>{op ? professionName(op.profession) : ""}</td>
-              <td className="num">{promotion(entry)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    </section>
   );
 }
 
@@ -362,57 +452,78 @@ export function RostersView() {
   const shown = list?.some((r) => r.id === selected) ? selected : (list?.[0]?.id ?? null);
 
   return (
-    <div className="split">
-      <div className="stack">
-        <ImportCard
-          onSaved={(id) => {
-            void refresh();
-            setSelected(id);
-            use(id);
-          }}
-        />
-        <div className="card">
-          <h2 className="card-title">Stored rosters</h2>
-          {error && <p className="error">{error}</p>}
-          {list && list.length === 0 && <p className="muted">None yet. Import one above.</p>}
-          <ul className="doc-list">
-            {list?.map((r) => (
-              <li key={r.id}>
-                <button
-                  type="button"
-                  className={r.id === shown ? "doc on" : "doc"}
-                  onClick={() => setSelected(r.id)}
-                  aria-current={r.id === shown}
-                >
-                  <span>{r.name ?? "Untitled roster"}</span>
-                  <span className="muted small">
-                    {r.id === active ? "in use · " : ""}
-                    {when(r.updated_at)}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-      <div>
-        {shown ? (
-          <RosterDetail
-            key={shown}
-            id={shown}
-            active={shown === active}
-            onUse={() => use(shown)}
-            onDeleted={() => {
-              if (active === shown) use(null);
-              setSelected(null);
+    <>
+      <PageHeader
+        title="Rosters"
+        description="The operators you own. Their promotion decides which base skills are active."
+      />
+      <div className="with-sidebar">
+        <div className="stack">
+          <section className="card">
+            <header className="card-head">
+              <h2 className="card-title">
+                Saved rosters {list && list.length > 0 && <span className="count">{list.length}</span>}
+              </h2>
+            </header>
+            {error && (
+              <div className="card-body">
+                <Callout tone="error">{error}</Callout>
+              </div>
+            )}
+            {list && list.length === 0 && <p className="doc-empty">None yet. Import one below.</p>}
+            {list && list.length > 0 && (
+              <ul className="doc-list">
+                {list.map((r) => (
+                  <li key={r.id}>
+                    <button
+                      type="button"
+                      className={r.id === shown ? "doc on" : "doc"}
+                      onClick={() => setSelected(r.id)}
+                      aria-current={r.id === shown}
+                    >
+                      <span className="doc-name">
+                        <span>{r.name ?? "Untitled roster"}</span>
+                        {r.id === active && <span className="badge accent">In use</span>}
+                      </span>
+                      <span className="doc-meta" title={when(r.updated_at)}>
+                        Updated {ago(r.updated_at)}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <ImportCard
+            onSaved={(id) => {
               void refresh();
+              setSelected(id);
+              use(id);
             }}
           />
-        ) : (
-          <div className="card muted">Import a roster to see it here.</div>
-        )}
+        </div>
+        <div className="min0">
+          {shown ? (
+            <RosterDetail
+              key={shown}
+              id={shown}
+              active={shown === active}
+              onUse={() => use(shown)}
+              onDeleted={() => {
+                if (active === shown) use(null);
+                setSelected(null);
+                void refresh();
+              }}
+            />
+          ) : (
+            <section className="card">
+              <Empty icon={<IconRoster size={20} />} title="No roster yet">
+                Import one from Krooster, ak-planner or JSON, and its operators show up here.
+              </Empty>
+            </section>
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }
-
