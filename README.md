@@ -402,8 +402,8 @@ library) has one screen per step, switched by the URL hash:
 
 - **Rosters** (`#/rosters`): fetch a Krooster roster by username, or paste
   or open another tool's export (or the canonical JSON), preview what it
-  reads as, with every warning named, and save it. Stored rosters list their
-  operators and import report.
+  reads as, with every warning named, and save it. A stored roster shows its
+  import report and its operators by rarity, filtered by name or promotion.
 - **Base** (`#/base`): rooms with their level, Factory formula, Trading Post
   orders, Dormitory ambience and Training Room job; running totals of power
   and of production, dormitory and function slots, from the same data the
@@ -420,17 +420,21 @@ library) has one screen per step, switched by the URL hash:
   solve runs; then per-day tiles against the start, the finalists with their
   trade-offs, the chosen finalist on the floor plan with changes against the
   best (or the start) outlined and listed, output per room per day, morale
-  as one sparkline per operator grouped by room (hover or arrow keys for a
-  reading; exhaustion is marked with a dot and the word), and everything the
-  model could not honour. Finalists other than the best are simulated on
-  request, the way the solve scored them.
+  as one sparkline per operator grouped by room with the lowest reading and
+  any hours exhausted (hover or arrow keys for a reading; exhaustion is
+  marked with a dot and the hours), or as a table with hours working and
+  resting, and everything the model could not honour. Relief that never
+  came on is named in one line rather than charted. Finalists other than
+  the best are simulated on request, the way the solve scored them.
 - **Game data** (`#/data`): provenance, every operator, and the raw
   simulate and solve panels for developers.
 
 The chart colours are the first three slots of a palette validated for
 colour-blind separation in light and dark mode; every coloured thing also
-carries a text label. Item names for Factory formulas are a display table in
-`frontend/src/format.ts`, since the item table is not ingested.
+carries a text label. The theme follows the system unless the switch in the
+header picks light or dark, which the browser remembers. Item names for
+Factory formulas are a display table in `frontend/src/format.ts`, since the
+item table is not ingested.
 
 ## Layout
 
@@ -459,7 +463,8 @@ crates/
 examples/requests/      simulation and solve requests for a 2-4-3 base
 frontend/               Layer 9: Vite + React + TypeScript
   src/views/            Rosters, Base, Plan, Results, Game data screens
-  src/components/       BaseMap (floor plan SVG), MoraleTable (sparklines)
+  src/components/       BaseMap (floor plan SVG), MoraleTable (sparklines),
+                        ui (page header, segmented control, meter), icons
   src/dev/              raw simulate and solve panels
 ```
 

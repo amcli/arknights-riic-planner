@@ -9,8 +9,16 @@ import { itemName, roomName } from "../format";
 /** Slots that never hold a staffable room. */
 const HIDDEN = new Set(["ELEVATOR", "CORRIDOR", "CUSTOM_P"]);
 
-/** A colour wash per slot category; the room's kind is always written out. */
-const TONE: Record<string, string> = { OUTPUT: "tone-1", CUSTOM: "tone-2", SPECIAL: "tone-3", FUNCTION: "tone-3" };
+/**
+ * A colour wash per slot category; the room's kind is always written out.
+ * Room lists elsewhere use the same tones for their swatches.
+ */
+export const TONE: Record<string, string> = { OUTPUT: "tone-1", CUSTOM: "tone-2", SPECIAL: "tone-3", FUNCTION: "tone-3" };
+
+/** The tone of a room kind's slot category. */
+export function toneOf(kind: RoomType, facilities: Map<RoomType, Facility>): string {
+  return TONE[facilities.get(kind)?.category ?? ""] ?? "tone-3";
+}
 
 const CW = 34; // px per grid column
 const CH = 36; // px per grid row
@@ -147,9 +155,12 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
           const changed = added.length > 0 || removed.length > 0;
           const extra = detail(room, formulas);
           const title = `${roomName(room.kind)} L${room.level}`;
+          // Text starts past the tone band down the room's left edge.
+          const left = rx + 10;
+          const textWidth = w - 15;
           // Names in one column, or two for wide rooms with many slots.
           const columns = cap > 3 && slot.size.rows <= 2 ? 2 : 1;
-          const colWidth = (w - 12) / columns;
+          const colWidth = textWidth / columns;
           const perColumn = Math.ceil(Math.max(cap, 1) / columns);
           const lines = ops
             .map((op, i) => ({ op, i }))
@@ -163,17 +174,19 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
                   ...(removed.length ? [`moved out: ${removed.map(name).join(", ")}`] : []),
                 ].join("\n")}
               </title>
-              <rect x={rx} y={ry} width={w} height={h} rx={6} />
-              <text className="room-title" x={rx + 6} y={ry + 13}>
-                {clip(title, w - (assignment ? 36 : 12), 6.1)}
+              <rect className="body" x={rx} y={ry} width={w} height={h} rx={6} />
+              <rect className="band" x={rx + 3} y={ry + 5} width={3} height={h - 10} rx={1.5} />
+              <text className="room-title" x={left} y={ry + 14}>
+                {clip(roomName(room.kind), textWidth - (assignment ? 38 : 18), 6)}
+                <tspan className="room-level"> L{room.level}</tspan>
               </text>
               {extra && (
-                <text className="room-detail" x={rx + 6} y={ry + 25}>
-                  {clip(extra, w - 12, 5.4)}
+                <text className="room-detail" x={left} y={ry + 26}>
+                  {clip(extra, textWidth, 5.4)}
                 </text>
               )}
               {assignment && (
-                <text className="room-count" x={rx + w - 6} y={ry + 13} textAnchor="end">
+                <text className="room-count" x={rx + w - 7} y={ry + 14} textAnchor="end">
                   {filled}/{cap}
                 </text>
               )}
@@ -187,8 +200,8 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
                   <text
                     key={op}
                     className={isNew ? "op op-new" : "op"}
-                    x={rx + 6 + column * colWidth}
-                    y={ry + (extra ? 38 : 29) + row * 12}
+                    x={left + column * colWidth}
+                    y={ry + (extra ? 39 : 30) + row * 12}
                   >
                     {clip(text, colWidth - 4)}
                   </text>
@@ -199,7 +212,7 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
         })}
       </svg>
       {unplaced.length > 0 && (
-        <p className="warn">
+        <p className="warn small">
           No slot left for: {unplaced.map((r) => `${roomName(r.kind)} (${r.id})`).join(", ")}
         </p>
       )}

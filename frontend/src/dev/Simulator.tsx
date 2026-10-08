@@ -101,13 +101,13 @@ export function Simulator({ names }: { names: Map<string, string> }) {
   };
 
   return (
-    <div className="card">
+    <div className="dev-panel">
       <p className="muted">
         Edit the request, then evaluate the starting instant or simulate the whole horizon. The request format
         follows <code>examples/requests/</code> in the repository.
       </p>
       <textarea
-        className="request"
+        className="mono"
         value={text}
         onChange={(e) => setText(e.target.value)}
         spellCheck={false}

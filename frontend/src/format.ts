@@ -109,3 +109,29 @@ export function promotion(entry: Roster[string]): string {
 export const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export const when = (iso: string) => new Date(iso).toLocaleString();
+
+/** "Sep 27, 5:49 PM", with the year only when it is not this one. */
+export function short(iso: string): string {
+  const d = new Date(iso);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString(undefined, {
+    year: sameYear ? undefined : "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+const RELATIVE = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
+/** "5 minutes ago", "yesterday"; the date itself after a week. */
+export function ago(iso: string): string {
+  const seconds = (new Date(iso).getTime() - Date.now()) / 1000;
+  const abs = Math.abs(seconds);
+  if (abs < 45) return "just now";
+  if (abs < 3600) return RELATIVE.format(Math.round(seconds / 60), "minute");
+  if (abs < 86_400) return RELATIVE.format(Math.round(seconds / 3600), "hour");
+  if (abs < 7 * 86_400) return RELATIVE.format(Math.round(seconds / 86_400), "day");
+  return short(iso);
+}

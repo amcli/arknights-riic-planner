@@ -95,14 +95,14 @@ export function Solver({ names }: { names: Map<string, string> }) {
   const busy = phase.state === "submitting" || phase.state === "polling";
 
   return (
-    <div className="card">
+    <div className="dev-panel">
       <p className="muted">
         Searches for better assignments: exhaustive when the space is small, simulated annealing otherwise, with
         the finalists re-scored by the full simulator. Solves run in the background on the server and are kept in
         the store.
       </p>
       <textarea
-        className="request"
+        className="mono"
         value={text}
         onChange={(e) => setText(e.target.value)}
         spellCheck={false}
