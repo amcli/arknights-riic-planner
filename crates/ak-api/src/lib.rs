@@ -2,6 +2,10 @@
 //!
 //! ```text
 //! GET    /healthz
+//! POST   /api/v1/auth/register             { username, password, email? } → 201 + session cookie
+//! POST   /api/v1/auth/login                { username, password } → session cookie
+//! POST   /api/v1/auth/logout
+//! GET    /api/v1/auth/me                   the account signed in
 //! GET    /api/v1/gamedata/version          provenance + parser stats
 //! GET    /api/v1/gamedata/operators        summary list
 //! GET    /api/v1/gamedata/operators/{id}   full operator
@@ -38,8 +42,9 @@
 //! roster as `base_id` / `roster_id` instead of including it ([`refs`]).
 //! Solves run in the background, a few at a time ([`jobs`]). A roster can
 //! be fetched from Krooster by username ([`krooster`]), the one route that
-//! reaches outside the server. Every error is JSON: `{ "error": message }`
-//! ([`error`]).
+//! reaches outside the server. Accounts sign in with a session cookie
+//! ([`auth`]); requests from other sites that would use or start a session
+//! are refused. Every error is JSON: `{ "error": message }` ([`error`]).
 //!
 //! The binary (`src/main.rs`) loads the game data, connects to the
 //! database and serves [`router`]; tests drive the same router in-process,
@@ -47,6 +52,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod bases;
 pub mod error;
 pub mod gamedata;
@@ -61,14 +67,18 @@ pub mod stored;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::http::{HeaderValue, header};
+use axum::middleware;
 use axum::routing::{get, post};
 use tower_http::compression::CompressionLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use ak_data::stats::DataStats;
 use ak_domain::GameData;
 use ak_store::Store;
 
+use auth::password::Passwords;
 pub use error::ApiError;
 pub use jobs::Jobs;
 
@@ -126,6 +136,8 @@ pub struct AppState {
     pub jobs: Arc<Jobs>,
     /// Where rosters are fetched from by Krooster username.
     pub krooster: Arc<krooster::Krooster>,
+    /// Hashes and checks passwords, a few at a time.
+    pub passwords: Arc<Passwords>,
 }
 
 impl AppState {
@@ -147,14 +159,27 @@ impl AppState {
             limits: Arc::new(limits),
             jobs,
             krooster: Arc::new(krooster::Krooster::default()),
+            passwords: Arc::new(Passwords::default()),
         }
     }
 }
 
-/// The API's routes, with JSON fallbacks, gzip compression and request
-/// tracing. CORS is left to the binary, since it depends on deployment.
+/// The API's routes, with JSON fallbacks, the cross-site guard
+/// ([`auth::session::guard`]), gzip compression and request tracing. CORS
+/// is left to the binary, since it depends on deployment.
 pub fn router(state: AppState) -> Router {
+    // Accounts are nobody else's business, caches included.
+    let accounts = Router::new()
+        .route("/api/v1/auth/register", post(auth::register))
+        .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/auth/me", get(auth::me))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
     Router::new()
+        .merge(accounts)
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/v1/gamedata/version", get(gamedata::version))
         .route("/api/v1/gamedata/operators", get(gamedata::list_operators))
@@ -196,6 +221,7 @@ pub fn router(state: AppState) -> Router {
         )
         .fallback(error::no_route)
         .method_not_allowed_fallback(error::wrong_method)
+        .layer(middleware::from_fn(auth::session::guard))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

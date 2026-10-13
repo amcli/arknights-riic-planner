@@ -35,8 +35,13 @@ axum = "0.8"
 # needs a C toolchain (as would SQLite).
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-native-tls", "postgres", "macros", "migrate", "uuid", "chrono", "json"] }
 dotenvy = "0.15"
+# Accounts: Argon2id password hashes, session cookies, random tokens.
+argon2 = "0.5"
+cookie = "0.18"
+getrandom = "0.4"
+unicode-normalization = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "set-header"] }
 serde_path_to_error = "0.1"
 # Test-only: drive the router in-process.
 tower = { version = "0.5", features = ["util"] }

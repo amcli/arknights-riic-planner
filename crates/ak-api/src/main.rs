@@ -169,6 +169,7 @@ async fn serve(cli: Serve) -> anyhow::Result<()> {
         store,
         limits,
     );
+    tokio::spawn(ak_api::auth::session::sweep(state.store.clone()));
     let resumed = ak_api::jobs::resume(&state)
         .await
         .context("resuming unfinished solves")?;

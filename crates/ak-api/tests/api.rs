@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Method, Request, Response, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+use ak_api::auth::session::Token;
 use ak_api::jobs::{JobStatus, SolveJob};
 use ak_api::krooster::Krooster;
 use ak_api::refs::Refs;
@@ -23,6 +24,7 @@ use ak_data::{Strictness, load_default};
 use ak_domain::{BaseConfig, GameData, Roster};
 use ak_eval::SimRequest;
 use ak_solver::SolveRequest;
+use ak_store::accounts::{Session, User};
 use ak_store::{Collection, Document, Store};
 
 fn data() -> Arc<GameData> {
@@ -97,7 +99,20 @@ impl Harness {
     }
 
     async fn raw(&self, method: Method, uri: &str, body: Option<&str>) -> Response<Body> {
+        self.raw_with(method, uri, body, &[]).await
+    }
+
+    async fn raw_with(
+        &self,
+        method: Method,
+        uri: &str,
+        body: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> Response<Body> {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         let body = match body {
             Some(text) => {
                 req = req.header(header::CONTENT_TYPE, "application/json");
@@ -831,6 +846,363 @@ async fn shutdown_waits_for_a_stopped_solve_to_be_recorded(pool: PgPool) {
     let (_, job) = h.get(&format!("/api/v1/solves/{id}")).await;
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["result"]["stopped"], "requested");
+}
+
+// ---- accounts --------------------------------------------------------------
+
+const PASSWORD: &str = "correct horse";
+
+/// The `Set-Cookie` line for the session cookie, attributes and all.
+fn set_cookie_line(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("__Host-session="))
+        .map(str::to_owned)
+}
+
+/// The session cookie a response sets, as a request sends it back.
+fn session_of(headers: &HeaderMap) -> Option<String> {
+    let line = set_cookie_line(headers)?;
+    Some(line.split(';').next().unwrap().to_owned())
+}
+
+impl Harness {
+    /// A request with extra headers; answers status, headers and body.
+    async fn send(
+        &self,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
+        let text = body.map(|b| b.to_string());
+        let resp = self.raw_with(method, uri, text.as_deref(), headers).await;
+        let headers = resp.headers().clone();
+        let (status, body) = read(resp).await;
+        (status, headers, body)
+    }
+
+    /// Registers `username` and returns its session cookie.
+    async fn register(&self, username: &str) -> String {
+        let body = json!({ "username": username, "password": PASSWORD });
+        let (status, headers, user) = self
+            .send(Method::POST, "/api/v1/auth/register", Some(body), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{user}");
+        session_of(&headers).unwrap()
+    }
+
+    /// `GET /auth/me` with `cookie`.
+    async fn me(&self, cookie: &str) -> (StatusCode, Value) {
+        let (status, _, body) = self
+            .send(Method::GET, "/api/v1/auth/me", None, &[("cookie", cookie)])
+            .await;
+        (status, body)
+    }
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn accounts_register_sign_in_and_out(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let body =
+        json!({ "username": "Doctor", "password": PASSWORD, "email": " doc@rhodes.example " });
+    let (status, headers, user) = h
+        .send(Method::POST, "/api/v1/auth/register", Some(body), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
+    assert_eq!(user["username"], "Doctor");
+    assert_eq!(user["email"], "doc@rhodes.example");
+    let fields: Vec<&str> = user
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(fields, ["created_at", "email", "id", "username"]);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    let set = set_cookie_line(&headers).unwrap();
+    for attribute in [
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Path=/",
+        "Max-Age=2592000",
+    ] {
+        assert!(set.contains(attribute), "{set}");
+    }
+    let first = session_of(&headers).unwrap();
+
+    let (status, me) = h.me(&first).await;
+    assert_eq!((status, &me), (StatusCode::OK, &user));
+    let (status, err) = h.get("/api/v1/auth/me").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_of(&err), "not signed in");
+    let (status, _) = h.me("__Host-session=0123").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Usernames are unique regardless of case.
+    let again = json!({ "username": "doctor", "password": "another password" });
+    let (status, err) = h.post("/api/v1/auth/register", again).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(error_of(&err).contains("taken"), "{err}");
+
+    // A wrong password, an unknown user and an impossible username all get
+    // the same answer.
+    let huge = "x".repeat(1 << 20);
+    for (username, password) in [
+        ("Doctor", "wrong horse"),
+        ("nobody", PASSWORD),
+        ("no one", PASSWORD),
+        ("Doctor", huge.as_str()),
+    ] {
+        let attempt = json!({ "username": username, "password": password });
+        let (status, err) = h.post("/api/v1/auth/login", attempt).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{username}");
+        assert_eq!(error_of(&err), "wrong username or password");
+    }
+
+    // Signing in, in any case, gets a fresh token and ends the session the
+    // request carried.
+    let attempt = json!({ "username": "DOCTOR", "password": PASSWORD });
+    let (status, headers, me) = h
+        .send(
+            Method::POST,
+            "/api/v1/auth/login",
+            Some(attempt),
+            &[("cookie", &first)],
+        )
+        .await;
+    assert_eq!((status, &me), (StatusCode::OK, &user));
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    let second = session_of(&headers).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(h.me(&first).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(h.me(&second).await.0, StatusCode::OK);
+
+    // Signing out ends the session and clears the cookie.
+    let (status, headers, _) = h
+        .send(
+            Method::POST,
+            "/api/v1/auth/logout",
+            None,
+            &[("cookie", &second)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(set_cookie_line(&headers).unwrap().contains("Max-Age=0"));
+    assert_eq!(h.me(&second).await.0, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = h.send(Method::POST, "/api/v1/auth/logout", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn registration_checks_its_fields(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    for (body, expected) in [
+        (
+            json!({ "username": "ab", "password": PASSWORD }),
+            "a username is",
+        ),
+        (
+            json!({ "username": "dot.ted", "password": PASSWORD }),
+            "a username is",
+        ),
+        (
+            json!({ "username": "kaltsit", "password": "short" }),
+            "8 to 128",
+        ),
+        (
+            json!({ "username": "kaltsit", "password": "x".repeat(129) }),
+            "8 to 128",
+        ),
+        (
+            json!({ "username": "kaltsit", "password": "x".repeat(1 << 20) }),
+            "8 to 128",
+        ),
+        (
+            json!({ "username": "kaltsit1", "password": "KALTSIT1" }),
+            "not be the username",
+        ),
+        (
+            json!({ "username": "kaltsit", "password": PASSWORD, "email": "kaltsit" }),
+            "email",
+        ),
+        (json!({ "username": "kaltsit" }), "password"),
+    ] {
+        let (status, err) = h.post("/api/v1/auth/register", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(error_of(&err).contains(expected), "{body}: {err}");
+    }
+    // Nothing was stored.
+    let attempt = json!({ "username": "kaltsit", "password": PASSWORD });
+    let (status, _) = h.post("/api/v1/auth/login", attempt).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // No email is fine, and passwords are compared normalised: "ﬁ" is "fi".
+    let body = json!({ "username": "kaltsit", "password": "ﬁrewall" });
+    let (status, user) = h.post("/api/v1/auth/register", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
+    assert_eq!(user["email"], Value::Null);
+    let attempt = json!({ "username": "kaltsit", "password": "firewall" });
+    let (status, _) = h.post("/api/v1/auth/login", attempt).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn expired_sessions_are_refused(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let cookie = h.register("closure").await;
+    let (_, user) = h.me(&cookie).await;
+    let token = Token::generate().unwrap();
+    let now = chrono::Utc::now();
+    h.state
+        .store
+        .create_session(&Session {
+            digest: token.digest(),
+            user_id: user["id"].as_str().unwrap().parse().unwrap(),
+            created_at: now - chrono::TimeDelta::days(31),
+            expires_at: now - chrono::TimeDelta::days(1),
+        })
+        .await
+        .unwrap();
+    let set = token.set_cookie();
+    let stale = set.to_str().unwrap().split(';').next().unwrap();
+    assert_eq!(h.me(stale).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn a_planted_look_alike_cookie_is_not_the_session(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let victim = h.register("amiya").await;
+    let attacker = h.register("w-the-sarkaz").await;
+    // A cookie whose name only percent-decodes to the session cookie's,
+    // which another site could have planted, is ignored whichever way round
+    // the browser sends them.
+    let planted = attacker.replacen("__Host-session", "%5F%5FHost-session", 1);
+    for cookies in [
+        format!("{victim}; {planted}"),
+        format!("{planted}; {victim}"),
+    ] {
+        let (status, me) = h.me(&cookies).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["username"], "amiya", "{cookies}");
+    }
+    assert_eq!(h.me(&planted).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn old_password_hashes_are_upgraded_at_sign_in(pool: PgPool) {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use argon2::{Algorithm, Argon2, Params, Version};
+
+    let h = Harness::new(pool, Limits::default());
+    let weak = Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(8 * 1024, 1, 1, None).unwrap(),
+    );
+    let salt = SaltString::encode_b64(&[9; 16]).unwrap();
+    let old = weak
+        .hash_password(PASSWORD.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
+    let user = User::new("warfarin".into(), None);
+    assert!(h.state.store.create_user(&user, &old).await.unwrap());
+
+    let attempt = json!({ "username": "warfarin", "password": PASSWORD });
+    let (status, _) = h.post("/api/v1/auth/login", attempt.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, stored) = h
+        .state
+        .store
+        .credentials("warfarin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+        "{stored}"
+    );
+    let (status, _) = h.post("/api/v1/auth/login", attempt).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn other_sites_cannot_use_or_start_a_session(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let cookie = h.register("mostima").await;
+    let refused = "refused a request from another site";
+    let attempt = json!({ "username": "mostima", "password": PASSWORD });
+
+    for site in ["cross-site", "same-site"] {
+        // Ending the session, or changing anything while carrying it…
+        let (status, _, err) = h
+            .send(
+                Method::POST,
+                "/api/v1/auth/logout",
+                None,
+                &[("cookie", &cookie), ("sec-fetch-site", site)],
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{site}");
+        assert_eq!(error_of(&err), refused);
+        let base = json!({ "base": example("243-base.json")["base"] });
+        let (status, _, _) = h
+            .send(
+                Method::POST,
+                "/api/v1/bases",
+                Some(base),
+                &[("cookie", &cookie), ("sec-fetch-site", site)],
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{site}");
+        // …or signing in, even without a session.
+        let (status, _, _) = h
+            .send(
+                Method::POST,
+                "/api/v1/auth/login",
+                Some(attempt.clone()),
+                &[("sec-fetch-site", site)],
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{site}");
+    }
+    assert_eq!(h.me(&cookie).await.0, StatusCode::OK);
+
+    // Reading is fine from anywhere, and so is a request with no session.
+    let (status, _, _) = h
+        .send(
+            Method::GET,
+            "/api/v1/auth/me",
+            None,
+            &[("cookie", &cookie), ("sec-fetch-site", "cross-site")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = h
+        .send(
+            Method::POST,
+            "/api/v1/simulate",
+            Some(example("243-base.json")),
+            &[("sec-fetch-site", "cross-site")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The site's own pages, and requests the user typed, may.
+    for site in ["same-origin", "none"] {
+        let (status, _, _) = h
+            .send(
+                Method::POST,
+                "/api/v1/auth/login",
+                Some(attempt.clone()),
+                &[("sec-fetch-site", site)],
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{site}");
+    }
 }
 
 // ---- roster import ---------------------------------------------------------

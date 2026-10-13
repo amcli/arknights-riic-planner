@@ -39,6 +39,16 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
+    /// `401`: the request is not signed in, or signing in failed.
+    pub fn unauthorized(message: impl ToString) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, message)
+    }
+
+    /// `403`: the request may not do this.
+    pub fn forbidden(message: impl ToString) -> Self {
+        Self::new(StatusCode::FORBIDDEN, message)
+    }
+
     /// `404`: no such thing.
     pub fn not_found(message: impl ToString) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)

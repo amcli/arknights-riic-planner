@@ -14,7 +14,7 @@ design; this README tracks what actually exists.
 | 4. Evaluator / mood sim | `ak-eval` | **Done for production and morale.** Instantaneous evaluator plus a deterministic fixed-tick simulator with rotation, collection and a shared depot. Clue output and resource accumulators are not simulated yet. |
 | 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
 | 6. Persistence | `ak-store` | **Done.** Versioned JSON documents for rosters, bases and solve jobs in Postgres, migrated on read; pooled connections; schema migrations applied by `ak-api migrate`, so the server runs as a role that cannot change the schema. |
-| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. JSON errors throughout, work limits, gzip, opt-in CORS. |
+| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. Accounts with password sign-in and cookie sessions. JSON errors throughout, work limits, gzip, opt-in CORS. |
 | 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (public profile, current, row and legacy shapes; the API fetches a profile by username) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
 | 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines. |
 
@@ -336,13 +336,54 @@ simulate and solve requests, and `--max-solve-ms` (ten minutes) becomes the
 time budget of any solve without a shorter one; the stored request shows
 the budget that applied.
 
+**Accounts.** `POST /api/v1/auth/register` creates an account from a
+username (3 to 32 letters, digits, `_` or `-`, unique regardless of case),
+a password and, optionally, an email address, and signs it in;
+`/auth/login` signs in, `/auth/logout` signs out and `GET /auth/me` answers
+with the account signed in. Nothing else uses accounts yet.
+
+- *Passwords* are 8 to 128 characters of anything, except the username,
+  NFKC-normalised so the same password typed on different keyboards
+  matches. They are stored as Argon2id hashes at OWASP's recommended cost
+  (19 MiB, two passes); a hash made at an older cost is replaced at the
+  next sign-in. Hashing runs on blocking threads, four at a time, and a
+  hash keeps its slot until it is done even if its client has gone; a
+  password over 4 KiB is refused before any of that work. A wrong
+  password and an unknown username get the same `401` after the same
+  work, so neither can be told apart.
+- *The email* is checked only for shape and is not unique: it is not
+  verified, so nobody can claim someone else's address first or learn
+  which addresses have accounts. It is shown only to its owner.
+- *Sessions* are 32 random bytes in a `__Host-session` cookie
+  (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`), lasting 30 days.
+  The database keeps only each token's SHA-256, so a leaked table cannot
+  be replayed. Signing in always issues a fresh token and ends the one the
+  request carried; signing out deletes it. Expired sessions are swept
+  hourly. Browsers accept `Secure` cookies from `http://localhost` (Chrome,
+  Edge and Firefox do; Safari does not), so the dev server works without
+  HTTPS; anywhere else, serve over HTTPS.
+- *Other sites.* `SameSite=Lax` keeps the cookie off other sites'
+  fetches, frames and form posts; only a plain link, which can only
+  `GET`, still carries it. On top of that, a request that would act on a
+  session (any method but `GET`, `HEAD`, `OPTIONS` or `TRACE`, carrying
+  the cookie) or start or end one (any such method under `/api/v1/auth/`)
+  is refused with `403` when the browser's `Sec-Fetch-Site` header says
+  it came from another site, which also covers another port on the same
+  host. The cookie is matched by its exact name, so a look-alike such as
+  `%5F%5FHost-session`, which another site could plant, is ignored. CORS
+  never allows credentials, so accounts work only same-origin, through
+  the dev proxy or a reverse proxy.
+- Account responses are sent `Cache-Control: no-store`.
+
 **Errors** are always JSON, `{ "error": message }`, including malformed
 bodies, unknown routes (`404`) and wrong methods (`405`, with `Allow`).
 Anything wrong in a body is `400`, and shape errors name the path
 (`base.rooms[0].kind: unknown variant …`), and a malformed document id is
-`400` too. A missing `Content-Type` is `415`. Database failures are
-logged in full and answered without detail: `503` when the database is
-unreachable or busy, `500` otherwise.
+`400` too. A missing `Content-Type` is `415`. A request that is not
+signed in, or a failed sign-in, is `401`; one refused for coming from
+another site is `403`. Database failures are logged in full and answered
+without detail: `503` when the database is unreachable or busy, `500`
+otherwise.
 
 **Transport.** Responses are gzip-compressed when the client accepts it (a
 24-hour simulation shrinks from 41 KB to 4 KB). CORS is off unless
@@ -472,6 +513,7 @@ crates/
   ak-store/             Layer 6: versioned JSON documents in Postgres
     migrations/         the schema, applied in order by `ak-api migrate`
   ak-api/               Layer 7: axum routes, references, job queue, limits
+    src/auth/           accounts: password hashing, session cookies, cross-site guard
     tests/api.rs        the router driven in-process
   ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve | import`
 examples/requests/      simulation and solve requests for a 2-4-3 base
@@ -572,6 +614,10 @@ leaves the machine.
 API endpoints:
 
 - `GET /healthz`
+- `POST /api/v1/auth/register` — body `{ username, password, email? }`, answers `201` with the account and a session cookie, `409` if the username is taken
+- `POST /api/v1/auth/login` — body `{ username, password }`, answers the account and a session cookie
+- `POST /api/v1/auth/logout` — ends the session, `204`
+- `GET /api/v1/auth/me` — the account signed in, or `401`
 - `GET /api/v1/gamedata/version` — source, SHA, fetch time, parser version, counts, coverage
 - `GET /api/v1/gamedata/operators` — summary list
 - `GET /api/v1/gamedata/operators/{id}`
