@@ -10,13 +10,13 @@ use serde_json::Value;
 
 use ak_domain::{Assignment, GameData};
 use ak_solver::{Progress, SolveRequest, Space};
-use ak_store::{Collection, Document, DocumentMeta, StoreError};
+use ak_store::{Collection, Document, DocumentMeta};
 
 use crate::error::{ApiError, Body};
 use crate::jobs::{self, JobStatus, SolveJob, Stopped};
 use crate::rosters::check_roster;
 use crate::simulation::check_ticks;
-use crate::stored::{self, Stored, blocking};
+use crate::stored::{self, Stored, blocking, to_completion};
 use crate::{AppState, Limits, refs};
 
 /// `POST` body: an optional name and the request. The request may name a
@@ -83,7 +83,8 @@ fn check_solve(data: &GameData, req: &SolveRequest) -> Result<(), ApiError> {
 }
 
 /// `POST /api/v1/solves`: validates, stores the job as `pending`, answers
-/// `202`, and queues it.
+/// `202`, and queues it. Storing and queueing finish together even if the
+/// client goes away, so no stored job is left unqueued.
 pub async fn create(
     State(s): State<AppState>,
     Body(body): Body<SolveBody>,
@@ -95,10 +96,13 @@ pub async fn create(
     let value = serde_json::to_value(&job).map_err(ApiError::internal)?;
     let doc = Document::new(body.name, value);
     let meta = doc.meta();
-    let id = doc.id.clone();
-    let store = s.store.clone();
-    blocking(move || store.put(Collection::Solves, &doc)).await??;
-    jobs::enqueue(&s, id, job);
+    let state = s.clone();
+    to_completion(async move {
+        state.store.insert(Collection::Solves, &doc).await?;
+        jobs::enqueue(&state, doc.id, job);
+        Ok::<_, ApiError>(())
+    })
+    .await??;
     let summary = SolveSummary {
         meta,
         status: JobStatus::Pending,
@@ -108,19 +112,23 @@ pub async fn create(
 
 /// `GET /api/v1/solves`: every job with its status, newest first.
 pub async fn list(State(s): State<AppState>) -> Result<Response, ApiError> {
-    let store = s.store.clone();
-    let summaries = blocking(move || -> Result<Vec<SolveSummary>, StoreError> {
-        let mut out = Vec::new();
-        for meta in store.list(Collection::Solves)? {
-            let status = store
-                .get(Collection::Solves, &meta.id)?
-                .and_then(|doc| serde_json::from_value(doc.body.get("status")?.clone()).ok())
+    let summaries: Vec<SolveSummary> = s
+        .store
+        .documents(Collection::Solves)
+        .await?
+        .into_iter()
+        .map(|doc| {
+            let status = doc
+                .body
+                .get("status")
+                .and_then(|status| serde_json::from_value(status.clone()).ok())
                 .unwrap_or(JobStatus::Failed);
-            out.push(SolveSummary { meta, status });
-        }
-        Ok(out)
-    })
-    .await??;
+            SolveSummary {
+                meta: doc.meta(),
+                status,
+            }
+        })
+        .collect();
     Ok(Json(summaries).into_response())
 }
 
@@ -130,7 +138,7 @@ async fn current(s: &AppState, id: String) -> Result<SolveView, ApiError> {
     let live = if job.status.is_finished() {
         None
     } else {
-        s.jobs.watch(&id)
+        s.jobs.watch(meta.id)
     };
     let live = live.unwrap_or_default();
     Ok(SolveView {
@@ -151,8 +159,9 @@ pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Re
 /// a running one ends its search at the next checkpoint and finishes
 /// `done` with the best found so far (`202`); a finished one is a `409`.
 pub async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    let (jobs, store, key) = (s.jobs.clone(), s.store.clone(), id.clone());
-    let outcome = blocking(move || jobs.stop(&*store, &key)).await??;
+    let key = stored::parse_id(&id)?;
+    let (jobs, store) = (s.jobs.clone(), s.store.clone());
+    let outcome = to_completion(async move { jobs.stop(&store, key).await }).await??;
     let status = match outcome {
         Stopped::Cancelled => StatusCode::OK,
         Stopped::Stopping => StatusCode::ACCEPTED,
@@ -207,8 +216,9 @@ pub async fn delete(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let (jobs, store, key) = (s.jobs.clone(), s.store.clone(), id.clone());
-    let removed = blocking(move || jobs.delete(&*store, &key)).await??;
+    let key = stored::parse_id(&id)?;
+    let (jobs, store) = (s.jobs.clone(), s.store.clone());
+    let removed = to_completion(async move { jobs.delete(&store, key).await }).await??;
     if removed {
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {

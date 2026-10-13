@@ -1,22 +1,72 @@
-//! `ak-api`: loads the game data, opens the store, picks up unfinished
-//! solves, and serves the routes in [`ak_api::router`].
+//! `ak-api`: connects to the database, loads the game data, picks up
+//! unfinished solves, and serves the routes in [`ak_api::router`].
+//! `ak-api migrate` applies the database migrations instead.
+//!
+//! Settings come from flags or the environment, and a `.env` file in the
+//! working directory or above it fills in any the environment lacks.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::http::{HeaderValue, Method, header};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use ak_api::{AppState, Jobs, Limits};
 use ak_data::{Strictness, load_source};
-use ak_store::FileStore;
+use ak_store::{PoolConfig, Store};
 
 #[derive(Parser)]
-#[command(name = "ak-api", version, about)]
+#[command(
+    name = "ak-api",
+    version,
+    about,
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    serve: Serve,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Apply any database migrations not yet applied, then exit.
+    Migrate {
+        /// Postgres URL of the database to migrate, as a role allowed to
+        /// change its schema.
+        #[arg(long, env = "AK_MIGRATE_DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+    },
+}
+
+/// Serve the API (the default).
+#[derive(Args)]
+struct Serve {
+    /// Postgres URL the server connects with, such as
+    /// postgres://riic_app:PASSWORD@localhost/riic. Set it in the environment
+    /// or .env rather than as a flag, which other users of the machine can
+    /// see; add ?sslmode=verify-full for a database on another host.
+    // Optional in the type so that `migrate` parses without it; clap still
+    // requires it to serve.
+    #[arg(long, env = "AK_DATABASE_URL", hide_env_values = true, required = true)]
+    database_url: Option<String>,
+    /// Most database connections the server holds open at once.
+    #[arg(long, env = "AK_DB_MAX_CONNECTIONS", default_value_t = PoolConfig::DEFAULT_MAX_CONNECTIONS)]
+    db_max_connections: u32,
+    /// Longest a request waits for a free database connection before it is
+    /// answered 503, in milliseconds.
+    #[arg(
+        long,
+        env = "AK_DB_ACQUIRE_TIMEOUT_MS",
+        default_value_t = PoolConfig::DEFAULT_ACQUIRE_TIMEOUT.as_millis() as u64
+    )]
+    db_acquire_timeout_ms: u64,
     /// Address to listen on.
     #[arg(long, env = "AK_API_ADDR", default_value = "127.0.0.1:8080")]
     addr: SocketAddr,
@@ -26,10 +76,6 @@ struct Cli {
     /// Manifest source to load (default: the manifest's default_source).
     #[arg(long, env = "AK_DATA_SOURCE")]
     source: Option<String>,
-    /// Directory for saved rosters, bases and solves (default:
-    /// <workspace>/store).
-    #[arg(long, env = "AK_STORE_DIR")]
-    store_dir: Option<PathBuf>,
     /// Browser origin allowed to call the API from another origin (CORS),
     /// such as http://localhost:5173. Repeat the flag or separate origins
     /// with commas. None by default: the frontend's dev server proxies
@@ -54,6 +100,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => return Err(e).context("reading .env"),
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -62,7 +113,36 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Migrate { database_url }) => {
+            ak_store::apply_migrations(&database_url)
+                .await
+                .context("migrating the database")?;
+            tracing::info!("the database schema is up to date");
+            Ok(())
+        }
+        None => serve(cli.serve).await,
+    }
+}
+
+async fn serve(cli: Serve) -> anyhow::Result<()> {
     let cors = cors_layer(&cli.cors_origins)?;
+    let pool = PoolConfig {
+        max_connections: cli.db_max_connections,
+        acquire_timeout: Duration::from_millis(cli.db_acquire_timeout_ms),
+    };
+    let url = cli
+        .database_url
+        .context("--database-url or AK_DATABASE_URL is required")?;
+    let store = Store::connect(&url, &pool)
+        .await
+        .context("connecting to the database")?;
+    store
+        .check_schema()
+        .await
+        .context("checking the database schema")?;
+    tracing::info!(?pool, "database connected");
+
     let root = cli
         .data_root
         .unwrap_or_else(ak_data::paths::default_data_root);
@@ -75,14 +155,6 @@ async fn main() -> anyhow::Result<()> {
         "game data loaded"
     );
 
-    let store_dir = cli.store_dir.unwrap_or_else(|| {
-        root.parent()
-            .map_or_else(|| PathBuf::from("store"), |p| p.join("store"))
-    });
-    let store = FileStore::open(&store_dir)
-        .with_context(|| format!("opening store at {}", store_dir.display()))?;
-    tracing::info!(dir = %store_dir.display(), "store opened");
-
     let limits = Limits {
         max_ticks: cli.max_ticks,
         max_solve_ms: cli.max_solve_ms,
@@ -94,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(
         Arc::new(loaded.data),
         loaded.report.skipped.len(),
-        Arc::new(store),
+        store,
         limits,
     );
     let resumed = ak_api::jobs::resume(&state)
@@ -115,6 +187,8 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.jobs.clone()))
         .await?;
+    state.jobs.drain().await;
+    state.store.close().await;
     Ok(())
 }
 
@@ -169,6 +243,16 @@ mod tests {
         resp.headers()
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .map(|v| v.to_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn migrate_needs_only_its_own_url() {
+        let cli = Cli::try_parse_from(["ak-api", "migrate", "--database-url", "postgres://x"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Migrate { database_url }) if database_url == "postgres://x"
+        ));
     }
 
     #[tokio::test]

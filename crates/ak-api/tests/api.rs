@@ -1,9 +1,9 @@
 //! Layer 7 tests: the router driven in-process against the pinned snapshot
-//! and a temporary store.
+//! and a fresh database per test, which `#[sqlx::test]` creates (from
+//! `DATABASE_URL`), migrates, and drops after a pass.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use tower::ServiceExt;
 
 use ak_api::jobs::{JobStatus, SolveJob};
@@ -22,7 +23,7 @@ use ak_data::{Strictness, load_default};
 use ak_domain::{BaseConfig, GameData, Roster};
 use ak_eval::SimRequest;
 use ak_solver::SolveRequest;
-use ak_store::{Collection, Document, FileStore, Store};
+use ak_store::{Collection, Document, Store};
 
 fn data() -> Arc<GameData> {
     static DATA: OnceLock<Arc<GameData>> = OnceLock::new();
@@ -53,10 +54,6 @@ fn export(name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-fn temp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("ak-api-test-{}", uuid::Uuid::new_v4()))
-}
-
 /// A solve request over the example base that searches for as long as it
 /// is allowed to.
 fn endless_solve() -> Value {
@@ -80,24 +77,15 @@ fn quick_solve() -> Value {
 struct Harness {
     app: Router,
     state: AppState,
-    dir: PathBuf,
-    /// Remove the store directory when dropped.
-    cleanup: bool,
 }
 
 impl Harness {
-    fn new(limits: Limits) -> Self {
-        Self::at(temp_dir(), limits)
-    }
-
-    fn at(dir: PathBuf, limits: Limits) -> Self {
-        let store = FileStore::open(&dir).unwrap();
-        let state = AppState::new(data(), 0, Arc::new(store), limits);
+    /// A server over the test's database.
+    fn new(pool: PgPool, limits: Limits) -> Self {
+        let state = AppState::new(data(), 0, Store::from_pool(pool), limits);
         Harness {
             app: ak_api::router(state.clone()),
             state,
-            dir,
-            cleanup: true,
         }
     }
 
@@ -190,9 +178,6 @@ impl Drop for Harness {
         // Let any search still running end quickly, so the test runtime can
         // shut down.
         self.state.jobs.shutdown();
-        if self.cleanup {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
     }
 }
 
@@ -231,9 +216,9 @@ fn is(status: &str) -> impl Fn(&Value) -> bool + '_ {
 
 // ---- game data -------------------------------------------------------------
 
-#[tokio::test]
-async fn game_data_endpoints() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn game_data_endpoints(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let data = data();
 
     let (status, body) = h.get("/healthz").await;
@@ -284,9 +269,9 @@ async fn game_data_endpoints() {
 
 // ---- errors ----------------------------------------------------------------
 
-#[tokio::test]
-async fn every_error_is_json() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn every_error_is_json(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
 
     let (status, err) = h.get("/api/v1/nothing").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -328,13 +313,63 @@ async fn every_error_is_json() {
     let (status, err) = h.get("/api/v1/rosters/not%20an%20id").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(error_of(&err).contains("invalid document id"), "{err}");
+    let (status, err) = h.delete("/api/v1/solves/42").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error_of(&err).contains("invalid document id"), "{err}");
+    // Only the spelling the store issues names a document.
+    let id = h
+        .create("bases", json!({ "base": example("243-base.json")["base"] }))
+        .await;
+    let (status, _) = h.get(&format!("/api/v1/bases/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, err) = h.get(&format!("/api/v1/bases/{}", id.to_uppercase())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error_of(&err).contains("invalid document id"), "{err}");
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn text_postgres_cannot_store_is_a_400(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let nul = "names and bodies may not contain NUL (\\u0000) characters";
+    // In a name (a text column)…
+    let base = example("243-base.json")["base"].clone();
+    let (status, err) = h
+        .post("/api/v1/bases", json!({ "name": "a\u{0}b", "base": base }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_of(&err), nul);
+    // …and in a body (jsonb): an unknown operator's id is kept in the
+    // import report.
+    let roster = json!({ "char_x\u{0}": { "op_id": "char_x\u{0}", "elite": 0, "level": 1, "potential": 1 } });
+    let (status, err) = h
+        .post(
+            "/api/v1/rosters",
+            json!({ "source": "krooster", "roster": roster }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(error_of(&err), nul);
+    let (_, listed) = h.get("/api/v1/rosters").await;
+    assert_eq!(listed, json!([]));
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn an_unreachable_database_is_a_503(pool: PgPool) {
+    let h = Harness::new(pool.clone(), Limits::default());
+    pool.close().await;
+    let (status, err) = h.get("/api/v1/rosters").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        error_of(&err),
+        "the database is unavailable; try again shortly"
+    );
 }
 
 // ---- simulation ------------------------------------------------------------
 
-#[tokio::test]
-async fn simulate_matches_the_library() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn simulate_matches_the_library(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let req = example("243-base.json");
 
     let (status, result) = h.post("/api/v1/simulate", req.clone()).await;
@@ -364,12 +399,15 @@ async fn simulate_matches_the_library() {
     assert!(error_of(&err).starts_with("invalid base"), "{err}");
 }
 
-#[tokio::test]
-async fn long_runs_are_refused() {
-    let h = Harness::new(Limits {
-        max_ticks: 100,
-        ..Limits::default()
-    });
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn long_runs_are_refused(pool: PgPool) {
+    let h = Harness::new(
+        pool,
+        Limits {
+            max_ticks: 100,
+            ..Limits::default()
+        },
+    );
     // 24 hours at 5 minutes is 288 ticks.
     let (status, err) = h.post("/api/v1/simulate", example("243-base.json")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -386,9 +424,9 @@ async fn long_runs_are_refused() {
 
 // ---- stored documents ------------------------------------------------------
 
-#[tokio::test]
-async fn rosters_round_trip() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn rosters_round_trip(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let roster = example("243-base.json")["roster"].clone();
 
     let id = h
@@ -446,9 +484,9 @@ async fn rosters_round_trip() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn bases_are_validated() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn bases_are_validated(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let base = example("243-base.json")["base"].clone();
     let id = h.create("bases", json!({ "base": base })).await;
     let (_, doc) = h.get(&format!("/api/v1/bases/{id}")).await;
@@ -468,9 +506,9 @@ async fn bases_are_validated() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn requests_can_name_stored_documents() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn requests_can_name_stored_documents(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let req = example("243-base.json");
     let base_id = h.create("bases", json!({ "base": req["base"] })).await;
     let roster_id = h
@@ -515,9 +553,9 @@ async fn requests_can_name_stored_documents() {
 
 // ---- solves ----------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_solve_runs_in_the_background() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn a_solve_runs_in_the_background(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let req = quick_solve();
     let base_id = h.create("bases", json!({ "base": req["base"] })).await;
     let roster_id = h
@@ -584,9 +622,9 @@ async fn a_solve_runs_in_the_background() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bad_solve_is_refused_before_it_is_queued() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn a_bad_solve_is_refused_before_it_is_queued(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let mut req = quick_solve();
     req["solver"]["restarts"] = json!(0);
     let (status, err) = h.post("/api/v1/solves", json!({ "request": req })).await;
@@ -601,9 +639,9 @@ async fn a_bad_solve_is_refused_before_it_is_queued() {
     assert_eq!(list, json!([]));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_running_solve_reports_progress_and_can_be_stopped() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn a_running_solve_reports_progress_and_can_be_stopped(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let id = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -633,12 +671,15 @@ async fn a_running_solve_reports_progress_and_can_be_stopped() {
     assert!(best >= start - 1e-6, "best {best} < start {start}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn solves_queue_and_can_be_cancelled_or_deleted() {
-    let h = Harness::new(Limits {
-        max_running_solves: 1,
-        ..Limits::default()
-    });
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn solves_queue_and_can_be_cancelled_or_deleted(pool: PgPool) {
+    let h = Harness::new(
+        pool,
+        Limits {
+            max_running_solves: 1,
+            ..Limits::default()
+        },
+    );
     let first = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -677,12 +718,15 @@ async fn solves_queue_and_can_be_cancelled_or_deleted() {
     assert_eq!(ids, vec![second.as_str()]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_server_caps_search_time() {
-    let h = Harness::new(Limits {
-        max_solve_ms: 300,
-        ..Limits::default()
-    });
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn the_server_caps_search_time(pool: PgPool) {
+    let h = Harness::new(
+        pool,
+        Limits {
+            max_solve_ms: 300,
+            ..Limits::default()
+        },
+    );
     let id = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -699,35 +743,35 @@ async fn the_server_caps_search_time() {
 }
 
 /// Writes a solve document straight into a store.
-fn stored_job(store: &FileStore, request: &Value, status: JobStatus, attempts: u32) -> String {
+async fn stored_job(store: &Store, request: &Value, status: JobStatus, attempts: u32) -> String {
     let request: SolveRequest = serde_json::from_value(request.clone()).unwrap();
     let mut job = SolveJob::new(request, Refs::default());
     job.status = status;
     job.attempts = attempts;
     let doc = Document::new(None, serde_json::to_value(&job).unwrap());
-    store.put(Collection::Solves, &doc).unwrap();
-    doc.id
+    store.insert(Collection::Solves, &doc).await.unwrap();
+    doc.id.to_string()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unfinished_solves_resume_after_a_restart() {
-    let dir = temp_dir();
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn unfinished_solves_resume_after_a_restart(pool: PgPool) {
     let (interrupted, waiting, doomed, cancelled) = {
-        let store = FileStore::open(&dir).unwrap();
+        let store = Store::from_pool(pool.clone());
         let quick = quick_solve();
         (
-            stored_job(&store, &quick, JobStatus::Running, 1),
-            stored_job(&store, &quick, JobStatus::Pending, 0),
+            stored_job(&store, &quick, JobStatus::Running, 1).await,
+            stored_job(&store, &quick, JobStatus::Pending, 0).await,
             stored_job(
                 &store,
                 &quick,
                 JobStatus::Running,
                 ak_api::jobs::MAX_ATTEMPTS,
-            ),
-            stored_job(&store, &quick, JobStatus::Cancelled, 0),
+            )
+            .await,
+            stored_job(&store, &quick, JobStatus::Cancelled, 0).await,
         )
     };
-    let h = Harness::at(dir, Limits::default());
+    let h = Harness::new(pool, Limits::default());
     assert_eq!(ak_api::jobs::resume(&h.state).await.unwrap(), 2);
 
     let job = h.wait_for(&interrupted, "done", is("done")).await;
@@ -746,12 +790,10 @@ async fn unfinished_solves_resume_after_a_restart() {
     assert!(job.get("started_at").is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_leaves_running_solves_for_the_next_start() {
-    let dir = temp_dir();
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn shutdown_leaves_running_solves_for_the_next_start(pool: PgPool) {
     let id = {
-        let mut h = Harness::at(dir.clone(), Limits::default());
-        h.cleanup = false;
+        let h = Harness::new(pool.clone(), Limits::default());
         let id = h
             .create("solves", json!({ "request": endless_solve() }))
             .await;
@@ -763,7 +805,7 @@ async fn shutdown_leaves_running_solves_for_the_next_start() {
         assert!(job.get("result").is_none());
         id
     };
-    let h = Harness::at(dir, Limits::default());
+    let h = Harness::new(pool, Limits::default());
     assert_eq!(ak_api::jobs::resume(&h.state).await.unwrap(), 1);
     let job = h
         .wait_for(&id, "running again", |job| job["attempts"] == 2)
@@ -771,11 +813,31 @@ async fn shutdown_leaves_running_solves_for_the_next_start() {
     assert_eq!(job["status"], "running");
 }
 
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn shutdown_waits_for_a_stopped_solve_to_be_recorded(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let id = h
+        .create("solves", json!({ "request": endless_solve() }))
+        .await;
+    h.wait_for(&id, "running", is("running")).await;
+    let (status, _) = h
+        .post(&format!("/api/v1/solves/{id}/stop"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    // The server stops while the stopped search is still winding down; it
+    // must not exit before the result is written.
+    h.state.jobs.shutdown();
+    h.state.jobs.drain().await;
+    let (_, job) = h.get(&format!("/api/v1/solves/{id}")).await;
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["result"]["stopped"], "requested");
+}
+
 // ---- roster import ---------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rosters_import_from_other_tools() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn rosters_import_from_other_tools(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let krooster = export("krooster-v3.json");
 
     // A preview reads the export without storing it.
@@ -910,10 +972,10 @@ fn fake_krooster() -> (String, Arc<Mutex<Vec<String>>>) {
     (base, asked)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rosters_fetched_from_krooster() {
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn rosters_fetched_from_krooster(pool: PgPool) {
     let (krooster, asked) = fake_krooster();
-    let h = Harness::new(Limits::default()).with_krooster(&krooster);
+    let h = Harness::new(pool, Limits::default()).with_krooster(&krooster);
 
     // The profile's roster, without the account details and supports.
     let (status, fetched) = h.get("/api/v1/import/krooster/Example-Doctor").await;
@@ -966,15 +1028,16 @@ async fn rosters_fetched_from_krooster() {
     assert_eq!(asked.lock().unwrap().len(), before);
 }
 
-#[tokio::test]
-async fn an_unreachable_krooster_is_a_bad_gateway() {
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn an_unreachable_krooster_is_a_bad_gateway(pool: PgPool) {
     // A port nothing listens on any more.
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
         .port();
-    let h = Harness::new(Limits::default()).with_krooster(&format!("http://127.0.0.1:{port}"));
+    let h =
+        Harness::new(pool, Limits::default()).with_krooster(&format!("http://127.0.0.1:{port}"));
     let (status, err) = h.get("/api/v1/import/krooster/example-doctor").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(
@@ -985,9 +1048,9 @@ async fn an_unreachable_krooster_is_a_bad_gateway() {
 
 // ---- frontend support ------------------------------------------------------
 
-#[tokio::test]
-async fn layout_and_constants_for_drawing_a_base() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn layout_and_constants_for_drawing_a_base(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let (status, layout) = h.get("/api/v1/gamedata/layout").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(layout["id"], "v0");
@@ -1012,9 +1075,9 @@ async fn layout_and_constants_for_drawing_a_base() {
     assert_eq!(exusiai["max_levels"], json!([50, 80, 90]));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_finalist_can_be_simulated() {
-    let h = Harness::new(Limits::default());
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn every_finalist_can_be_simulated(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
     let mut req = quick_solve();
     req["solver"]["top_k"] = json!(3);
     let id = h.create("solves", json!({ "request": req })).await;

@@ -41,8 +41,9 @@
 //! reaches outside the server. Every error is JSON: `{ "error": message }`
 //! ([`error`]).
 //!
-//! The binary (`src/main.rs`) loads the game data, opens the store and
-//! serves [`router`]; tests drive the same router in-process.
+//! The binary (`src/main.rs`) loads the game data, connects to the
+//! database and serves [`router`]; tests drive the same router in-process,
+//! each against a fresh database.
 
 #![forbid(unsafe_code)]
 
@@ -118,7 +119,7 @@ pub struct AppState {
     /// Operators the lenient transform had to skip.
     pub operators_skipped: usize,
     /// Rosters, bases and solve jobs.
-    pub store: Arc<dyn Store>,
+    pub store: Store,
     /// Bounds on the work one request can ask for.
     pub limits: Arc<Limits>,
     /// Queued and running solves.
@@ -133,7 +134,7 @@ impl AppState {
     pub fn new(
         data: Arc<GameData>,
         operators_skipped: usize,
-        store: Arc<dyn Store>,
+        store: Store,
         limits: Limits,
     ) -> Self {
         let stats = Arc::new(ak_data::stats::compute(&data));

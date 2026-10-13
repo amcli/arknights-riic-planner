@@ -3,7 +3,9 @@
 //! Every error the API returns has a JSON body `{ "error": message }`,
 //! including malformed bodies, unknown routes and wrong methods. Anything
 //! the client got wrong in a body is `400`; a missing `Content-Type` is
-//! `415` and an oversized body `413`, as axum decides.
+//! `415` and an oversized body `413`, as axum decides. Database failures
+//! are logged in full but answered without detail: `503` when the database
+//! is unreachable or busy, `500` otherwise.
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -56,6 +58,11 @@ impl ApiError {
     pub fn bad_gateway(message: impl ToString) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, message)
     }
+
+    /// `503`: we cannot serve this right now; try again shortly.
+    pub fn unavailable(message: impl ToString) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -79,8 +86,18 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
         match e {
-            StoreError::BadId(_) => Self::bad_request(e),
-            other => Self::internal(other),
+            StoreError::Unavailable(_) => {
+                tracing::warn!("{e}");
+                Self::unavailable("the database is unavailable; try again shortly")
+            }
+            StoreError::Unstorable(_) => {
+                Self::bad_request("names and bodies may not contain NUL (\\u0000) characters")
+            }
+            StoreError::NewerSchema { .. } | StoreError::Migration { .. } => Self::internal(e),
+            StoreError::Database(_) | StoreError::Schema(_) | StoreError::Migrate(_) => {
+                tracing::error!("{e}");
+                Self::internal("database error")
+            }
         }
     }
 }

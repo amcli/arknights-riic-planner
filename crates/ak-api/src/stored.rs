@@ -1,5 +1,5 @@
 //! Helpers shared by the document collections: create, replace, fetch,
-//! list and remove, all run off the async executor.
+//! list and remove.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -7,7 +7,9 @@ use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use ak_store::{Collection, Document, DocumentMeta, StoreError};
+use uuid::Uuid;
+
+use ak_store::{Collection, Document, DocumentMeta};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -23,11 +25,29 @@ pub struct Stored<T> {
     pub body: T,
 }
 
-/// Runs file or CPU work off the async executor.
+/// Runs blocking or CPU-heavy work off the async executor.
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ApiError> {
     Ok(tokio::task::spawn_blocking(f).await?)
+}
+
+/// Runs `work` to the end even if the request is dropped (the client
+/// disconnects) part way through, for changes that must not stop halfway.
+pub async fn to_completion<T: Send + 'static>(
+    work: impl Future<Output = T> + Send + 'static,
+) -> Result<T, ApiError> {
+    Ok(tokio::spawn(work).await?)
+}
+
+/// The id a path or request names, or `400` if it is not one the store
+/// could have issued. Only the spelling the store issues (lower-case,
+/// hyphenated) is accepted, so each document has one id.
+pub fn parse_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::try_parse(id)
+        .ok()
+        .filter(|uuid| uuid.hyphenated().to_string() == id)
+        .ok_or_else(|| ApiError::bad_request(format!("invalid document id {id:?}")))
 }
 
 /// Stores a new document and answers `201` with its metadata.
@@ -50,10 +70,8 @@ pub async fn insert(
 ) -> Result<DocumentMeta, ApiError> {
     let body = serde_json::to_value(body).map_err(ApiError::internal)?;
     let doc = Document::new(name, body);
-    let meta = doc.meta();
-    let store = s.store.clone();
-    blocking(move || store.put(collection, &doc)).await??;
-    Ok(meta)
+    s.store.insert(collection, &doc).await?;
+    Ok(doc.meta())
 }
 
 /// Replaces a document's body (and its name, when one is given) and
@@ -79,22 +97,19 @@ pub async fn update(
     body: impl Serialize,
 ) -> Result<DocumentMeta, ApiError> {
     let body = serde_json::to_value(body).map_err(ApiError::internal)?;
-    let store = s.store.clone();
-    let key = id.clone();
-    let meta = blocking(move || -> Result<Option<DocumentMeta>, StoreError> {
-        let Some(mut doc) = store.get(collection, &key)? else {
-            return Ok(None);
-        };
-        if name.is_some() {
-            doc.name = name;
-        }
-        doc.body = body;
-        doc.touch();
-        store.put(collection, &doc)?;
-        Ok(Some(doc.meta()))
-    })
-    .await??;
-    meta.ok_or_else(|| missing(collection, &id))
+    let Some(mut doc) = find(s, collection, id.clone()).await? else {
+        return Err(missing(collection, &id));
+    };
+    if name.is_some() {
+        doc.name = name;
+    }
+    doc.body = body;
+    doc.touch();
+    if s.store.update(collection, &doc).await? {
+        Ok(doc.meta())
+    } else {
+        Err(missing(collection, &id))
+    }
 }
 
 /// Reads a document, if it exists.
@@ -103,8 +118,7 @@ pub async fn find(
     collection: Collection,
     id: String,
 ) -> Result<Option<Document>, ApiError> {
-    let store = s.store.clone();
-    Ok(blocking(move || store.get(collection, &id)).await??)
+    Ok(s.store.get(collection, parse_id(&id)?).await?)
 }
 
 /// Reads a document, or answers `404`.
@@ -115,8 +129,7 @@ pub async fn fetch(s: &AppState, collection: Collection, id: String) -> Result<D
 
 /// Lists a collection, newest first.
 pub async fn listing(s: &AppState, collection: Collection) -> Result<Vec<DocumentMeta>, ApiError> {
-    let store = s.store.clone();
-    Ok(blocking(move || store.list(collection)).await??)
+    Ok(s.store.list(collection).await?)
 }
 
 /// Deletes a document and answers `204`, or `404` if it was not there.
@@ -125,10 +138,7 @@ pub async fn remove(
     collection: Collection,
     id: String,
 ) -> Result<Response, ApiError> {
-    let store = s.store.clone();
-    let key = id.clone();
-    let removed = blocking(move || store.delete(collection, &key)).await??;
-    if removed {
+    if s.store.delete(collection, parse_id(&id)?).await? {
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(missing(collection, &id))

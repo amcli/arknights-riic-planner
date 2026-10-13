@@ -13,7 +13,7 @@ design; this README tracks what actually exists.
 | 3. Domain model | `ak-domain` | **Done.** `BaseConfig` (validated against room limits, layout slots and power), `Assignment` (checked mutators, so it cannot hold an impossible state), `Roster`. |
 | 4. Evaluator / mood sim | `ak-eval` | **Done for production and morale.** Instantaneous evaluator plus a deterministic fixed-tick simulator with rotation, collection and a shared depot. Clue output and resource accumulators are not simulated yet. |
 | 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
-| 6. Persistence | `ak-store` | **Done, file-backed.** Versioned JSON documents for rosters, bases and solve jobs, migrated on read. The Postgres backend the plan calls for waits for a database; the trait is in place. |
+| 6. Persistence | `ak-store` | **Done.** Versioned JSON documents for rosters, bases and solve jobs in Postgres, migrated on read; pooled connections; schema migrations applied by `ak-api migrate`, so the server runs as a role that cannot change the schema. |
 | 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. JSON errors throughout, work limits, gzip, opt-in CORS. |
 | 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (public profile, current, row and legacy shapes; the API fetches a profile by username) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
 | 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines. |
@@ -261,19 +261,28 @@ name, timestamps, a `schema_version` and a JSON body. Bodies are never
 decomposed into columns. A document from an older schema is migrated on
 read; one from a newer build is refused rather than guessed at.
 
-The only backend is a directory of JSON files, one per document, each
-write atomic (temp file, then rename). It needs no database and no C
-toolchain, both of which this machine lacks; a Postgres JSONB backend can
-replace it behind the same `Store` trait. The API opens the store at
-`<workspace>/store` (`--store-dir` or `AK_STORE_DIR`), which is git-ignored.
+Documents live in one Postgres table, `documents`, keyed by collection
+and UUID, with the body as `jsonb`. The table comes from the SQL
+migrations in `crates/ak-store/migrations/`, which are compiled into the
+binary and applied by `ak-api migrate`, not by the server: the server
+connects as a role that can read and write rows but not change the
+schema, and refuses to start until every migration it knows has been
+applied, unchanged. Queries are parameterised; nothing user-supplied is
+ever spliced into SQL.
+
+The server keeps a pool of connections (`--db-max-connections`, 10 by
+default). A request that cannot get one within `--db-acquire-timeout-ms`
+(3 seconds) is answered `503`, as is any request while the database is
+down; idle connections close after ten minutes, and each is replaced
+after thirty. See [Database](#database) for setting one up.
 
 Solve documents and their life cycle are described under Layer 7.
 
 ## How Layer 7 works
 
 `ak-api` is a library (`ak_api::router`, driven in-process by
-`crates/ak-api/tests/api.rs`) plus a thin binary that loads the data, opens
-the store and serves it.
+`crates/ak-api/tests/api.rs`) plus a thin binary that connects to the
+database, loads the data and serves it.
 
 **References.** Any request that carries a `base` or `roster` (evaluate,
 simulate, solve) may name a stored one instead, as `base_id` / `roster_id`.
@@ -318,7 +327,9 @@ afterwards.
 **Restarts.** On Ctrl-C the server tells running searches to stop and
 leaves their documents as they are. On the next start every `pending` or
 `running` solve is queued again and runs from the beginning; one that has
-been cut off three times is marked `failed` instead.
+been cut off three times is marked `failed` instead. A solve that finishes
+anyway (it was re-scoring, or had been stopped by request) is recorded
+before the server exits.
 
 **Limits.** `--max-ticks` (50 000 by default) bounds horizon ÷ tick for
 simulate and solve requests, and `--max-solve-ms` (ten minutes) becomes the
@@ -328,14 +339,16 @@ the budget that applied.
 **Errors** are always JSON, `{ "error": message }`, including malformed
 bodies, unknown routes (`404`) and wrong methods (`405`, with `Allow`).
 Anything wrong in a body is `400`, and shape errors name the path
-(`base.rooms[0].kind: unknown variant …`). A missing `Content-Type` is
-`415`.
+(`base.rooms[0].kind: unknown variant …`), and a malformed document id is
+`400` too. A missing `Content-Type` is `415`. Database failures are
+logged in full and answered without detail: `503` when the database is
+unreachable or busy, `500` otherwise.
 
 **Transport.** Responses are gzip-compressed when the client accepts it (a
 24-hour simulation shrinks from 41 KB to 4 KB). CORS is off unless
 `--cors-origin` lists origins: the Vite dev server proxies `/api`, so the
 frontend never needs it, and a permissive policy would let any web page
-read and delete a local store.
+read and delete stored documents.
 
 ## How Layer 8 works
 
@@ -456,7 +469,8 @@ crates/
     tests/scenarios.rs  golden scenarios, one per rule
   ak-solver/            Layer 5: space, exhaustive, anneal, objective, evaluator
     tests/solver.rs     exhaustive vs annealing, determinism, locks, budget
-  ak-store/             Layer 6: versioned JSON documents, file-backed
+  ak-store/             Layer 6: versioned JSON documents in Postgres
+    migrations/         the schema, applied in order by `ak-api migrate`
   ak-api/               Layer 7: axum routes, references, job queue, limits
     tests/api.rs        the router driven in-process
   ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve | import`
@@ -509,7 +523,7 @@ manifest, so a half-done bump fails loudly.
 ## Running
 
 ```bash
-cargo test --workspace                     # 161 tests, a few seconds after the first build
+cargo test --workspace                     # the ak-store and ak-api tests need Postgres (below)
 cargo run -p ak-data-sync -- check         # verify pins, digests, schema, transform
 cargo run -p ak-cli -- stats               # counts + parser coverage as JSON
 cargo run -p ak-cli -- op char_285_medic2  # one operator, resolved skills
@@ -517,13 +531,43 @@ cargo run -p ak-cli -- simulate examples/requests/243-base.json             # 24
 cargo run -p ak-cli -- simulate --evaluate examples/requests/243-base.json  # starting instant
 cargo run -p ak-cli -- solve examples/requests/solve-243.json               # search, ~2 s
 cargo run -p ak-cli -- import krooster roster.json                          # read another tool's roster
-cargo run -p ak-api                        # http://127.0.0.1:8080, store in ./store
-cargo run -p ak-api -- --help              # limits, CORS origins, store and data paths
+cargo run -p ak-api -- migrate             # create or update the database schema
+cargo run -p ak-api                        # http://127.0.0.1:8080
+cargo run -p ak-api -- --help              # database pool, limits, CORS origins, data path
 ```
 
 ```bash
 cd frontend && npm install && npm run dev  # http://localhost:5173, proxies /api to the backend
 ```
+
+### Database
+
+The API needs Postgres 15 or later. Three roles keep the server away
+from the schema: `riic_owner` owns it and is used only to migrate,
+`riic_app` is what the server connects as and may only read and write
+rows, and `riic_test` creates a throwaway database per test. Once, as the
+`postgres` superuser (`psql -U postgres`), with passwords of your own:
+
+```sql
+CREATE ROLE riic_owner LOGIN PASSWORD '…';
+CREATE ROLE riic_app LOGIN PASSWORD '…';
+CREATE ROLE riic_test LOGIN CREATEDB PASSWORD '…';
+CREATE DATABASE riic OWNER riic_owner;
+CREATE DATABASE riic_test OWNER riic_test;
+ALTER ROLE riic_app SET statement_timeout = '30s';
+\connect riic
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO riic_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE riic_owner IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO riic_app;
+```
+
+Then copy `.env.example` to `.env` (git-ignored), fill in the passwords,
+and run `cargo run -p ak-api -- migrate`. The binary and the tests read
+`.env` from the working directory or above it; real environment
+variables win over it. Keep database URLs out of flags, which other users
+of the machine can see, and add `?sslmode=verify-full` to any URL that
+leaves the machine.
 
 API endpoints:
 
@@ -556,6 +600,7 @@ supply 0`.
 ## Toolchain notes
 
 - Rust stable, edition 2024. On Windows without MSVC the GNU host works;
-  `ureq` is configured with `native-tls` so no C compiler is needed.
+  `ureq` and `sqlx` are configured with `native-tls` so no C compiler is
+  needed. That also rules out SQLite, whose crates compile it from C.
 - `[profile.dev.package."*"] opt-level = 2` keeps the 16 MB JSON parse fast in
   test builds.
