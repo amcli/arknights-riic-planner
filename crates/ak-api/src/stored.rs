@@ -1,5 +1,6 @@
 //! Helpers shared by the document collections: create, replace, fetch,
-//! list and remove.
+//! list and remove, each on behalf of one account (`owner`). Another
+//! account's document is answered as missing.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -53,23 +54,25 @@ pub fn parse_id(id: &str) -> Result<Uuid, ApiError> {
 /// Stores a new document and answers `201` with its metadata.
 pub async fn create(
     s: &AppState,
+    owner: Uuid,
     collection: Collection,
     name: Option<String>,
     body: impl Serialize,
 ) -> Result<Response, ApiError> {
-    let meta = insert(s, collection, name, body).await?;
+    let meta = insert(s, owner, collection, name, body).await?;
     Ok((StatusCode::CREATED, Json(meta)).into_response())
 }
 
 /// Stores a new document and returns its metadata.
 pub async fn insert(
     s: &AppState,
+    owner: Uuid,
     collection: Collection,
     name: Option<String>,
     body: impl Serialize,
 ) -> Result<DocumentMeta, ApiError> {
     let body = serde_json::to_value(body).map_err(ApiError::internal)?;
-    let doc = Document::new(name, body);
+    let doc = Document::new(owner, name, body);
     s.store.insert(collection, &doc).await?;
     Ok(doc.meta())
 }
@@ -78,12 +81,13 @@ pub async fn insert(
 /// answers with its metadata.
 pub async fn replace(
     s: &AppState,
+    owner: Uuid,
     collection: Collection,
     id: String,
     name: Option<String>,
     body: impl Serialize,
 ) -> Result<Response, ApiError> {
-    let meta = update(s, collection, id, name, body).await?;
+    let meta = update(s, owner, collection, id, name, body).await?;
     Ok(Json(meta).into_response())
 }
 
@@ -91,13 +95,14 @@ pub async fn replace(
 /// returns its metadata, or `404`.
 pub async fn update(
     s: &AppState,
+    owner: Uuid,
     collection: Collection,
     id: String,
     name: Option<String>,
     body: impl Serialize,
 ) -> Result<DocumentMeta, ApiError> {
     let body = serde_json::to_value(body).map_err(ApiError::internal)?;
-    let Some(mut doc) = find(s, collection, id.clone()).await? else {
+    let Some(mut doc) = find(s, owner, collection, id.clone()).await? else {
         return Err(missing(collection, &id));
     };
     if name.is_some() {
@@ -115,30 +120,41 @@ pub async fn update(
 /// Reads a document, if it exists.
 pub async fn find(
     s: &AppState,
+    owner: Uuid,
     collection: Collection,
     id: String,
 ) -> Result<Option<Document>, ApiError> {
-    Ok(s.store.get(collection, parse_id(&id)?).await?)
+    Ok(s.store.get(owner, collection, parse_id(&id)?).await?)
 }
 
 /// Reads a document, or answers `404`.
-pub async fn fetch(s: &AppState, collection: Collection, id: String) -> Result<Document, ApiError> {
-    let doc = find(s, collection, id.clone()).await?;
+pub async fn fetch(
+    s: &AppState,
+    owner: Uuid,
+    collection: Collection,
+    id: String,
+) -> Result<Document, ApiError> {
+    let doc = find(s, owner, collection, id.clone()).await?;
     doc.ok_or_else(|| missing(collection, &id))
 }
 
 /// Lists a collection, newest first.
-pub async fn listing(s: &AppState, collection: Collection) -> Result<Vec<DocumentMeta>, ApiError> {
-    Ok(s.store.list(collection).await?)
+pub async fn listing(
+    s: &AppState,
+    owner: Uuid,
+    collection: Collection,
+) -> Result<Vec<DocumentMeta>, ApiError> {
+    Ok(s.store.list(owner, collection).await?)
 }
 
 /// Deletes a document and answers `204`, or `404` if it was not there.
 pub async fn remove(
     s: &AppState,
+    owner: Uuid,
     collection: Collection,
     id: String,
 ) -> Result<Response, ApiError> {
-    if s.store.delete(collection, parse_id(&id)?).await? {
+    if s.store.delete(owner, collection, parse_id(&id)?).await? {
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(missing(collection, &id))

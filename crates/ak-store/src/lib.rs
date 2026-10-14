@@ -1,8 +1,10 @@
 //! Persistence (Layer 6): a document store for rosters, bases and solves,
 //! and the accounts that sign in ([`accounts`]), kept in Postgres.
 //!
-//! Every stored thing is a [`Document`]: an id, timestamps, an optional
-//! name, a `schema_version`, and a JSON body. Bodies are never decomposed
+//! Every stored thing is a [`Document`]: an id, the account that owns it,
+//! timestamps, an optional name, a `schema_version`, and a JSON body. Reads
+//! and writes name the owner, so one account never sees another's
+//! documents. Bodies are never decomposed
 //! into columns; the domain still moves too fast for that. Old bodies are
 //! migrated on read ([`migrate`]), never in place.
 //!
@@ -68,6 +70,8 @@ impl fmt::Display for Collection {
 pub struct Document {
     /// Unique within its collection.
     pub id: Uuid,
+    /// The account it belongs to.
+    pub owner: Uuid,
     /// The schema the body was written with.
     pub schema_version: u32,
     /// When it was stored, to the millisecond.
@@ -81,11 +85,13 @@ pub struct Document {
 }
 
 impl Document {
-    /// A new document with a fresh id and the current schema version.
-    pub fn new(name: Option<String>, body: Value) -> Self {
+    /// A new document for `owner`, with a fresh id and the current schema
+    /// version.
+    pub fn new(owner: Uuid, name: Option<String>, body: Value) -> Self {
         let now = timestamp();
         Document {
             id: Uuid::new_v4(),
+            owner,
             schema_version: SCHEMA_VERSION,
             created_at: now,
             updated_at: now,
@@ -134,6 +140,7 @@ pub struct DocumentMeta {
 struct Row {
     #[sqlx(flatten)]
     meta: DocumentMeta,
+    owner_id: Uuid,
     body: Value,
 }
 
@@ -148,6 +155,7 @@ impl From<Row> for Document {
         } = row.meta;
         Document {
             id,
+            owner: row.owner_id,
             schema_version,
             created_at,
             updated_at,
@@ -411,15 +419,16 @@ impl Store {
         self.pool.close().await;
     }
 
-    /// Stores a new document.
+    /// Stores a new document for its owner.
     pub async fn insert(&self, collection: Collection, doc: &Document) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO documents \
-             (collection, id, schema_version, created_at, updated_at, name, body) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             (collection, id, owner_id, schema_version, created_at, updated_at, name, body) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(collection.as_str())
         .bind(doc.id)
+        .bind(doc.owner)
         .bind(version_column(doc.schema_version)?)
         .bind(doc.created_at)
         .bind(doc.updated_at)
@@ -431,16 +440,17 @@ impl Store {
     }
 
     /// Writes a stored document's name, body, schema version and
-    /// `updated_at`. Returns whether it was there; a deleted document stays
-    /// deleted.
+    /// `updated_at`, if its owner still has it. Returns whether it was there;
+    /// a deleted document stays deleted.
     pub async fn update(&self, collection: Collection, doc: &Document) -> Result<bool, StoreError> {
         let done = sqlx::query(
             "UPDATE documents \
-             SET schema_version = $3, updated_at = $4, name = $5, body = $6 \
-             WHERE collection = $1 AND id = $2",
+             SET schema_version = $4, updated_at = $5, name = $6, body = $7 \
+             WHERE collection = $1 AND id = $2 AND owner_id = $3",
         )
         .bind(collection.as_str())
         .bind(doc.id)
+        .bind(doc.owner)
         .bind(version_column(doc.schema_version)?)
         .bind(doc.updated_at)
         .bind(&doc.name)
@@ -450,39 +460,69 @@ impl Store {
         Ok(done.rows_affected() > 0)
     }
 
-    /// Reads a document, migrated to the current schema.
+    /// Reads one of `owner`'s documents, migrated to the current schema.
+    /// Someone else's is not there.
     pub async fn get(
         &self,
+        owner: Uuid,
         collection: Collection,
         id: Uuid,
     ) -> Result<Option<Document>, StoreError> {
         let row: Option<Row> = sqlx::query_as(
-            "SELECT id, name, schema_version, created_at, updated_at, body \
-             FROM documents WHERE collection = $1 AND id = $2",
+            "SELECT id, owner_id, name, schema_version, created_at, updated_at, body \
+             FROM documents WHERE collection = $1 AND id = $2 AND owner_id = $3",
         )
         .bind(collection.as_str())
         .bind(id)
+        .bind(owner)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| migrate(row.into())).transpose()
     }
 
-    /// Lists a collection, newest first.
-    pub async fn list(&self, collection: Collection) -> Result<Vec<DocumentMeta>, StoreError> {
+    /// Lists `owner`'s documents in a collection, newest first.
+    pub async fn list(
+        &self,
+        owner: Uuid,
+        collection: Collection,
+    ) -> Result<Vec<DocumentMeta>, StoreError> {
         Ok(sqlx::query_as(
             "SELECT id, name, schema_version, created_at, updated_at \
-             FROM documents WHERE collection = $1 ORDER BY created_at DESC, id",
+             FROM documents WHERE owner_id = $1 AND collection = $2 \
+             ORDER BY created_at DESC, id",
         )
+        .bind(owner)
         .bind(collection.as_str())
         .fetch_all(&self.pool)
         .await?)
     }
 
-    /// Every document in a collection, migrated, newest first.
-    pub async fn documents(&self, collection: Collection) -> Result<Vec<Document>, StoreError> {
+    /// Every one of `owner`'s documents in a collection, migrated, newest
+    /// first.
+    pub async fn documents(
+        &self,
+        owner: Uuid,
+        collection: Collection,
+    ) -> Result<Vec<Document>, StoreError> {
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT id, name, schema_version, created_at, updated_at, body \
-             FROM documents WHERE collection = $1 ORDER BY created_at DESC, id",
+            "SELECT id, owner_id, name, schema_version, created_at, updated_at, body \
+             FROM documents WHERE owner_id = $1 AND collection = $2 \
+             ORDER BY created_at DESC, id",
+        )
+        .bind(owner)
+        .bind(collection.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|row| migrate(row.into())).collect()
+    }
+
+    /// Every document in a collection, whoever owns it, migrated, oldest
+    /// first. For the server's own housekeeping, such as picking up
+    /// unfinished solves; never to answer a request.
+    pub async fn all_documents(&self, collection: Collection) -> Result<Vec<Document>, StoreError> {
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, owner_id, name, schema_version, created_at, updated_at, body \
+             FROM documents WHERE collection = $1 ORDER BY created_at, id",
         )
         .bind(collection.as_str())
         .fetch_all(&self.pool)
@@ -490,13 +530,21 @@ impl Store {
         rows.into_iter().map(|row| migrate(row.into())).collect()
     }
 
-    /// Removes a document. Returns whether one was there.
-    pub async fn delete(&self, collection: Collection, id: Uuid) -> Result<bool, StoreError> {
-        let done = sqlx::query("DELETE FROM documents WHERE collection = $1 AND id = $2")
-            .bind(collection.as_str())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+    /// Removes one of `owner`'s documents. Returns whether it was there.
+    pub async fn delete(
+        &self,
+        owner: Uuid,
+        collection: Collection,
+        id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query(
+            "DELETE FROM documents WHERE collection = $1 AND id = $2 AND owner_id = $3",
+        )
+        .bind(collection.as_str())
+        .bind(id)
+        .bind(owner)
+        .execute(&self.pool)
+        .await?;
         Ok(done.rows_affected() > 0)
     }
 }
@@ -519,21 +567,35 @@ fn version_column(version: u32) -> Result<i32, StoreError> {
 mod tests {
     use serde_json::json;
 
+    use super::accounts::User;
     use super::*;
+
+    /// A new account's id, to own documents.
+    async fn account(store: &Store, username: &str) -> Uuid {
+        let user = User::new(username.into(), None);
+        assert!(store.create_user(&user, "hash").await.unwrap());
+        user.id
+    }
 
     #[sqlx::test]
     async fn insert_get_list_delete_round_trip(pool: PgPool) {
         let store = Store::from_pool(pool);
-        let a = Document::new(Some("first".into()), json!({ "x": 1 }));
-        let b = Document::new(None, json!([1, 2, 3]));
+        let owner = account(&store, "doctor").await;
+        let a = Document::new(owner, Some("first".into()), json!({ "x": 1 }));
+        let b = Document::new(owner, None, json!([1, 2, 3]));
         store.insert(Collection::Bases, &a).await.unwrap();
         store.insert(Collection::Bases, &b).await.unwrap();
 
-        let back = store.get(Collection::Bases, a.id).await.unwrap().unwrap();
+        let back = store
+            .get(owner, Collection::Bases, a.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(back, a);
-        assert_eq!(store.get(Collection::Rosters, a.id).await.unwrap(), None);
+        let elsewhere = store.get(owner, Collection::Rosters, a.id).await.unwrap();
+        assert_eq!(elsewhere, None);
 
-        let listed = store.list(Collection::Bases).await.unwrap();
+        let listed = store.list(owner, Collection::Bases).await.unwrap();
         assert_eq!(listed.len(), 2);
         assert!(
             listed
@@ -545,19 +607,93 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].created_at >= w[1].created_at)
         );
-        assert_eq!(store.documents(Collection::Bases).await.unwrap().len(), 2);
-        assert!(store.list(Collection::Solves).await.unwrap().is_empty());
+        let all = store.documents(owner, Collection::Bases).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            store
+                .list(owner, Collection::Solves)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
-        assert!(store.delete(Collection::Bases, a.id).await.unwrap());
-        assert!(!store.delete(Collection::Bases, a.id).await.unwrap());
-        assert_eq!(store.get(Collection::Bases, a.id).await.unwrap(), None);
-        assert_eq!(store.list(Collection::Bases).await.unwrap().len(), 1);
+        assert!(store.delete(owner, Collection::Bases, a.id).await.unwrap());
+        assert!(!store.delete(owner, Collection::Bases, a.id).await.unwrap());
+        assert_eq!(
+            store.get(owner, Collection::Bases, a.id).await.unwrap(),
+            None
+        );
+        assert_eq!(store.list(owner, Collection::Bases).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test]
+    async fn owners_see_only_their_own(pool: PgPool) {
+        let store = Store::from_pool(pool.clone());
+        let mine = account(&store, "doctor").await;
+        let theirs = account(&store, "kaltsit").await;
+        let mut doc = Document::new(mine, None, json!({ "v": 1 }));
+        store.insert(Collection::Rosters, &doc).await.unwrap();
+
+        let peek = store
+            .get(theirs, Collection::Rosters, doc.id)
+            .await
+            .unwrap();
+        assert_eq!(peek, None);
+        assert!(
+            store
+                .list(theirs, Collection::Rosters)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let docs = store.documents(theirs, Collection::Rosters).await.unwrap();
+        assert!(docs.is_empty());
+        assert!(
+            !store
+                .delete(theirs, Collection::Rosters, doc.id)
+                .await
+                .unwrap()
+        );
+        let mut stolen = doc.clone();
+        stolen.owner = theirs;
+        stolen.body = json!({ "v": "stolen" });
+        assert!(!store.update(Collection::Rosters, &stolen).await.unwrap());
+
+        // Housekeeping sees everyone's, oldest first.
+        let other = Document::new(theirs, None, json!({ "v": 2 }));
+        store.insert(Collection::Rosters, &other).await.unwrap();
+        let ids: Vec<Uuid> = store
+            .all_documents(Collection::Rosters)
+            .await
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(ids, [doc.id, other.id]);
+
+        // An account's documents go with it.
+        doc.body = json!({ "v": 3 });
+        assert!(store.update(Collection::Rosters, &doc).await.unwrap());
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(mine)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ids: Vec<Uuid> = store
+            .all_documents(Collection::Rosters)
+            .await
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(ids, [other.id]);
     }
 
     #[sqlx::test]
     async fn update_keeps_created_at_and_never_resurrects(pool: PgPool) {
         let store = Store::from_pool(pool);
-        let mut doc = Document::new(None, json!({ "v": 1 }));
+        let owner = account(&store, "doctor").await;
+        let mut doc = Document::new(owner, None, json!({ "v": 1 }));
         store.insert(Collection::Solves, &doc).await.unwrap();
         let created = doc.created_at;
         doc.body = json!({ "v": 2 });
@@ -565,7 +701,7 @@ mod tests {
         doc.touch();
         assert!(store.update(Collection::Solves, &doc).await.unwrap());
         let back = store
-            .get(Collection::Solves, doc.id)
+            .get(owner, Collection::Solves, doc.id)
             .await
             .unwrap()
             .unwrap();
@@ -575,26 +711,31 @@ mod tests {
         // An update names its collection, and a deleted document stays
         // deleted.
         assert!(!store.update(Collection::Bases, &doc).await.unwrap());
-        store.delete(Collection::Solves, doc.id).await.unwrap();
+        store
+            .delete(owner, Collection::Solves, doc.id)
+            .await
+            .unwrap();
         assert!(!store.update(Collection::Solves, &doc).await.unwrap());
-        assert_eq!(store.get(Collection::Solves, doc.id).await.unwrap(), None);
+        let gone = store.get(owner, Collection::Solves, doc.id).await.unwrap();
+        assert_eq!(gone, None);
     }
 
     #[sqlx::test]
     async fn refuses_newer_schemas(pool: PgPool) {
         let store = Store::from_pool(pool);
-        let mut doc = Document::new(None, Value::Null);
+        let owner = account(&store, "doctor").await;
+        let mut doc = Document::new(owner, None, Value::Null);
         doc.schema_version = SCHEMA_VERSION + 1;
         store.insert(Collection::Rosters, &doc).await.unwrap();
         assert!(matches!(
-            store.get(Collection::Rosters, doc.id).await,
+            store.get(owner, Collection::Rosters, doc.id).await,
             Err(StoreError::NewerSchema { .. })
         ));
         assert!(matches!(
-            store.documents(Collection::Rosters).await,
+            store.documents(owner, Collection::Rosters).await,
             Err(StoreError::NewerSchema { .. })
         ));
-        let mut old = Document::new(None, Value::Null);
+        let mut old = Document::new(owner, None, Value::Null);
         old.schema_version = 0;
         assert!(matches!(
             migrate(old),
@@ -611,9 +752,35 @@ mod tests {
         store.check_schema().await.unwrap();
     }
 
+    #[sqlx::test(migrations = false)]
+    async fn documents_without_an_owner_stop_the_owner_migration(pool: PgPool) {
+        let mut steps = MIGRATOR
+            .iter()
+            .filter(|m| !m.migration_type.is_down_migration());
+        for m in steps.by_ref().take(2) {
+            sqlx::raw_sql(&m.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO documents (collection, id, schema_version, created_at, updated_at, body)              VALUES ('bases', $1, 1, now(), now(), '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let owners = steps.next().unwrap();
+        assert_eq!(owners.description, "document owners");
+        let err = sqlx::raw_sql(&owners.sql).execute(&pool).await.unwrap_err();
+        assert!(err.to_string().contains("have no owner"), "{err}");
+        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM documents")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
     #[test]
     fn times_are_written_to_the_millisecond() {
-        let doc = Document::new(None, Value::Null);
+        let doc = Document::new(Uuid::new_v4(), None, Value::Null);
         assert_eq!(doc.created_at.timestamp_subsec_nanos() % 1_000_000, 0);
         let meta = serde_json::to_value(doc.meta()).unwrap();
         let written = meta["created_at"].as_str().unwrap();

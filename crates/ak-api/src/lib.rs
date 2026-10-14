@@ -38,6 +38,12 @@
 //!                                          finalist n simulated as the solve scored it
 //! ```
 //!
+//! The game data, `/healthz` and signing up, in and out are public.
+//! Everything else needs a signed-in account ([`auth`]): each account sees,
+//! names and changes only its own rosters, bases and solves, and another
+//! account's answers `404` as if it did not exist. Those answers are
+//! personal, so they are sent `Cache-Control: no-store`.
+//!
 //! Requests to evaluate, simulate or solve may name a stored base or
 //! roster as `base_id` / `roster_id` instead of including it ([`refs`]).
 //! Solves run in the background, a few at a time ([`jobs`]). A roster can
@@ -168,18 +174,7 @@ impl AppState {
 /// ([`auth::session::guard`]), gzip compression and request tracing. CORS
 /// is left to the binary, since it depends on deployment.
 pub fn router(state: AppState) -> Router {
-    // Accounts are nobody else's business, caches included.
-    let accounts = Router::new()
-        .route("/api/v1/auth/register", post(auth::register))
-        .route("/api/v1/auth/login", post(auth::login))
-        .route("/api/v1/auth/logout", post(auth::logout))
-        .route("/api/v1/auth/me", get(auth::me))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
-        ));
-    Router::new()
-        .merge(accounts)
+    let public = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/v1/gamedata/version", get(gamedata::version))
         .route("/api/v1/gamedata/operators", get(gamedata::list_operators))
@@ -194,7 +189,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/gamedata/formulas", get(gamedata::list_formulas))
         .route("/api/v1/gamedata/layout", get(gamedata::layout))
-        .route("/api/v1/gamedata/constants", get(gamedata::constants))
+        .route("/api/v1/gamedata/constants", get(gamedata::constants));
+    // Accounts and everything they own: each handler takes the
+    // `auth::CurrentUser` it acts for. Nobody else's business, caches
+    // included.
+    let personal = Router::new()
+        .route("/api/v1/auth/register", post(auth::register))
+        .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/auth/me", get(auth::me))
         .route("/api/v1/evaluate", post(simulation::evaluate))
         .route("/api/v1/simulate", post(simulation::simulate))
         .route("/api/v1/rosters", get(rosters::list).post(rosters::create))
@@ -219,6 +222,13 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/solves/{id}/candidates/{n}/simulation",
             get(solves::candidate_simulation),
         )
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
+    Router::new()
+        .merge(public)
+        .merge(personal)
         .fallback(error::no_route)
         .method_not_allowed_fallback(error::wrong_method)
         .layer(middleware::from_fn(auth::session::guard))

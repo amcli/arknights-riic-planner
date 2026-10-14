@@ -4,11 +4,13 @@
 //! solve) may name a stored one instead, as `base_id` or `roster_id`. The
 //! reference is resolved when the request arrives, so a solve job keeps the
 //! exact base and roster it ran with even if the stored ones change later;
-//! the ids are kept alongside as provenance.
+//! the ids are kept alongside as provenance. Only the requesting account's
+//! documents can be named.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use ak_store::Collection;
 
@@ -34,10 +36,11 @@ impl Refs {
     }
 }
 
-/// Replaces `base_id` and `roster_id` in a request object with the stored
-/// documents' contents, then reads the result as `T`.
+/// Replaces `base_id` and `roster_id` in a request object with `owner`'s
+/// stored documents' contents, then reads the result as `T`.
 pub async fn resolve<T: DeserializeOwned>(
     s: &AppState,
+    owner: Uuid,
     request: Value,
 ) -> Result<(T, Refs), ApiError> {
     let Value::Object(mut map) = request else {
@@ -59,7 +62,7 @@ pub async fn resolve<T: DeserializeOwned>(
                 "give `{field}` or `{id_field}`, not both"
             )));
         }
-        let Some(doc) = stored::find(s, collection, id.clone()).await? else {
+        let Some(doc) = stored::find(s, owner, collection, id.clone()).await? else {
             return Err(ApiError::bad_request(format!("no stored {field} {id}")));
         };
         let Some(content) = doc.body.get(field).cloned() else {

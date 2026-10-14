@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use ureq::tls::{TlsConfig, TlsProvider};
 
 use crate::AppState;
+use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::stored::blocking;
 
@@ -142,6 +143,7 @@ fn profile_roster(body: &[u8]) -> Option<Value> {
 /// user's public profile.
 pub async fn roster(
     State(s): State<AppState>,
+    _: CurrentUser,
     Path(username): Path<String>,
 ) -> Result<Response, ApiError> {
     let krooster = s.krooster.clone();

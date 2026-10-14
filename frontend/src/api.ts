@@ -1,6 +1,8 @@
 // Typed client for the ak-api endpoints. Types mirror the serde output of
 // the Rust domain structs; keep them in sync by hand until an OpenAPI/TS
 // generator is wired in. Every error body is `{ "error": message }`.
+// Requests go same-origin, so the browser sends the session cookie itself;
+// the page never sees it.
 
 export type RoomType =
   | "CONTROL"
@@ -356,6 +358,16 @@ export interface SolveProgress {
   elapsed_ms: number;
 }
 
+// ---- accounts --------------------------------------------------------------
+
+/** An account, as its owner sees it. */
+export interface Account {
+  id: string;
+  username: string;
+  email: string | null;
+  created_at: string;
+}
+
 // ---- Layer 6: stored documents ---------------------------------------------
 
 export interface DocumentMeta {
@@ -425,23 +437,37 @@ export interface SolveJob extends DocumentMeta {
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
-    message: string,
+    /** The server's explanation, without the status. */
+    public readonly detail: string,
   ) {
-    super(message);
+    super(`${status} ${detail}`);
     this.name = "ApiError";
   }
 }
 
+const signedOutListeners = new Set<() => void>();
+
+/**
+ * Calls `listener` whenever the server answers that a request is not signed
+ * in (a session that ended or expired). Returns the unsubscribe.
+ */
+export function onSignedOut(listener: () => void): () => void {
+  signedOutListeners.add(listener);
+  return () => signedOutListeners.delete(listener);
+}
+
 async function parse<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    let detail = res.statusText;
+    // HTTP/2 has no status text, so a proxy's error page leaves only the code.
+    let detail = res.statusText || `HTTP ${res.status}`;
     try {
       const body = (await res.json()) as { error?: string };
       if (body.error) detail = body.error;
     } catch {
       // non-JSON error body; keep statusText
     }
-    throw new ApiError(res.status, `${res.status} ${detail}`);
+    if (res.status === 401) signedOutListeners.forEach((listener) => listener());
+    throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -466,6 +492,15 @@ async function deleteJson(path: string): Promise<void> {
 }
 
 export const api = {
+  auth: {
+    /** The account signed in; a `401` when there is none. */
+    me: () => getJson<Account>("/api/v1/auth/me"),
+    register: (username: string, password: string, email?: string) =>
+      sendJson<Account>("POST", "/api/v1/auth/register", { username, password, email }),
+    login: (username: string, password: string) =>
+      sendJson<Account>("POST", "/api/v1/auth/login", { username, password }),
+    logout: () => sendJson<void>("POST", "/api/v1/auth/logout", {}),
+  },
   version: () => getJson<GameDataVersion>("/api/v1/gamedata/version"),
   operators: () => getJson<OperatorSummary[]>("/api/v1/gamedata/operators"),
   facilities: () => getJson<Facility[]>("/api/v1/gamedata/facilities"),

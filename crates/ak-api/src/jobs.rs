@@ -1,8 +1,9 @@
 //! Background solves.
 //!
 //! A solve is a stored document ([`SolveJob`]) plus, while it is queued or
-//! running, an in-memory entry in [`Jobs`] that holds its live progress and
-//! its stop flag. The document moves through these statuses:
+//! running, an in-memory entry in [`Jobs`] that holds its owner, its live
+//! progress and its stop flag. Every write to the document is its owner's,
+//! and only its owner can stop or delete it. The document moves through these statuses:
 //!
 //! ```text
 //! pending ──▶ running ──▶ done      (result; `result.stopped` if stopped early)
@@ -142,6 +143,8 @@ struct LiveState {
 /// so a failed stop or delete can simply be tried again.
 #[derive(Debug)]
 struct Live {
+    /// The account the solve belongs to.
+    owner: Uuid,
     state: tokio::sync::Mutex<LiveState>,
     stop: AtomicBool,
     progress: Mutex<Option<Progress>>,
@@ -211,19 +214,20 @@ impl Jobs {
         })
     }
 
-    /// Stops a job: a queued one is cancelled at once, a running one ends
-    /// its search at the next checkpoint and reports what it found. Run it
-    /// with [`to_completion`](crate::stored::to_completion), so a dropped
-    /// request cannot leave it half done.
-    pub async fn stop(&self, store: &Store, id: Uuid) -> Result<Stopped, StoreError> {
-        let Some(live) = self.get(id) else {
+    /// Stops one of `owner`'s jobs: a queued one is cancelled at once, a
+    /// running one ends its search at the next checkpoint and reports what
+    /// it found. Someone else's job is not live, as far as `owner` can tell.
+    /// Run it with [`to_completion`](crate::stored::to_completion), so a
+    /// dropped request cannot leave it half done.
+    pub async fn stop(&self, store: &Store, owner: Uuid, id: Uuid) -> Result<Stopped, StoreError> {
+        let Some(live) = self.get(id).filter(|live| live.owner == owner) else {
             return Ok(Stopped::NotLive);
         };
         let mut st = live.state.lock().await;
         match st.stage {
             Stage::Queued => {
                 if !st.deleted {
-                    update(store, id, |job| {
+                    update(store, owner, id, |job| {
                         job.status = JobStatus::Cancelled;
                         job.finished_at = Some(ak_store::now());
                     })
@@ -242,16 +246,16 @@ impl Jobs {
         }
     }
 
-    /// Deletes a job's document, stopping the job first if it is queued or
-    /// running. Returns whether there was a document. Run it with
-    /// [`to_completion`](crate::stored::to_completion), so a dropped request
-    /// cannot leave it half done.
-    pub async fn delete(&self, store: &Store, id: Uuid) -> Result<bool, StoreError> {
-        let Some(live) = self.get(id) else {
-            return store.delete(Collection::Solves, id).await;
+    /// Deletes one of `owner`'s job documents, stopping the job first if it
+    /// is queued or running. Returns whether there was a document. Run it
+    /// with [`to_completion`](crate::stored::to_completion), so a dropped
+    /// request cannot leave it half done.
+    pub async fn delete(&self, store: &Store, owner: Uuid, id: Uuid) -> Result<bool, StoreError> {
+        let Some(live) = self.get(id).filter(|live| live.owner == owner) else {
+            return store.delete(owner, Collection::Solves, id).await;
         };
         let mut st = live.state.lock().await;
-        let removed = store.delete(Collection::Solves, id).await?;
+        let removed = store.delete(owner, Collection::Solves, id).await?;
         st.deleted = true;
         if st.stage == Stage::Queued {
             st.stage = Stage::Cancelled;
@@ -305,10 +309,15 @@ impl Jobs {
     }
 }
 
-/// Reads a solve document, changes its job, and writes it back. A missing
-/// document is left missing.
-async fn update(store: &Store, id: Uuid, f: impl FnOnce(&mut SolveJob)) -> Result<(), StoreError> {
-    let Some(mut doc) = store.get(Collection::Solves, id).await? else {
+/// Reads one of `owner`'s solve documents, changes its job, and writes it
+/// back. A missing document is left missing.
+async fn update(
+    store: &Store,
+    owner: Uuid,
+    id: Uuid,
+    f: impl FnOnce(&mut SolveJob),
+) -> Result<(), StoreError> {
+    let Some(mut doc) = store.get(owner, Collection::Solves, id).await? else {
         return Ok(());
     };
     let Ok(mut job) = serde_json::from_value::<SolveJob>(doc.body.clone()) else {
@@ -334,7 +343,7 @@ async fn record(store: &Store, id: Uuid, live: &Live, f: impl FnOnce(&mut SolveJ
     if st.deleted {
         return;
     }
-    let result = update(store, id, f).await;
+    let result = update(store, live.owner, id, f).await;
     drop(st);
     if let Err(e) = result {
         tracing::error!(%id, "cannot save solve: {e}");
@@ -358,9 +367,10 @@ impl Observer for LiveObserver<'_> {
     }
 }
 
-/// Queues a stored job; it runs when a slot is free.
-pub fn enqueue(state: &AppState, id: Uuid, job: SolveJob) {
+/// Queues one of `owner`'s stored jobs; it runs when a slot is free.
+pub fn enqueue(state: &AppState, owner: Uuid, id: Uuid, job: SolveJob) {
     let live = Arc::new(Live {
+        owner,
         state: tokio::sync::Mutex::new(LiveState {
             stage: Stage::Queued,
             deleted: false,
@@ -458,11 +468,10 @@ async fn run(state: &AppState, id: Uuid, live: &Arc<Live>, mut job: SolveJob) {
 pub async fn resume(state: &AppState) -> Result<usize, ApiError> {
     let store = &state.store;
     let mut queued = Vec::new();
-    // Oldest first, so they run in the order they were submitted.
-    let mut docs = store.documents(Collection::Solves).await?;
-    docs.reverse();
-    for doc in docs {
-        let id = doc.id;
+    // Everyone's, oldest first, so they run in the order they were
+    // submitted.
+    for doc in store.all_documents(Collection::Solves).await? {
+        let (owner, id) = (doc.owner, doc.id);
         let Ok(job) = serde_json::from_value::<SolveJob>(doc.body) else {
             tracing::warn!(%id, "stored solve is unreadable; skipping it");
             continue;
@@ -472,7 +481,7 @@ pub async fn resume(state: &AppState) -> Result<usize, ApiError> {
         }
         if job.attempts >= MAX_ATTEMPTS {
             let attempts = job.attempts;
-            update(store, id, |job| {
+            update(store, owner, id, |job| {
                 job.status = JobStatus::Failed;
                 job.error = Some(format!(
                     "the server stopped during each of {attempts} attempts; giving up"
@@ -486,12 +495,12 @@ pub async fn resume(state: &AppState) -> Result<usize, ApiError> {
         again.status = JobStatus::Pending;
         again.started_at = None;
         let copy = again.clone();
-        update(store, id, |job| *job = copy).await?;
-        queued.push((id, again));
+        update(store, owner, id, |job| *job = copy).await?;
+        queued.push((owner, id, again));
     }
     let n = queued.len();
-    for (id, job) in queued {
-        enqueue(state, id, job);
+    for (owner, id, job) in queued {
+        enqueue(state, owner, id, job);
     }
     Ok(n)
 }

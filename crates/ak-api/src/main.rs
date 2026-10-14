@@ -79,7 +79,8 @@ struct Serve {
     /// Browser origin allowed to call the API from another origin (CORS),
     /// such as http://localhost:5173. Repeat the flag or separate origins
     /// with commas. None by default: the frontend's dev server proxies
-    /// /api, so it never needs CORS.
+    /// /api, so it never needs CORS. CORS never carries credentials, so a
+    /// listed origin can use only the public game data.
     #[arg(
         long = "cors-origin",
         env = "AK_API_CORS_ORIGINS",

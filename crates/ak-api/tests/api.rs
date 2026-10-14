@@ -14,6 +14,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 use ak_api::auth::session::Token;
 use ak_api::jobs::{JobStatus, SolveJob};
@@ -79,16 +80,35 @@ fn quick_solve() -> Value {
 struct Harness {
     app: Router,
     state: AppState,
+    /// The session cookie sent with every request that sends none of its
+    /// own.
+    cookie: Option<String>,
 }
 
 impl Harness {
-    /// A server over the test's database.
+    /// A server over the test's database, not signed in.
     fn new(pool: PgPool, limits: Limits) -> Self {
         let state = AppState::new(data(), 0, Store::from_pool(pool), limits);
         Harness {
             app: ak_api::router(state.clone()),
             state,
+            cookie: None,
         }
+    }
+
+    /// A server over the test's database, signed in as a new account,
+    /// `doctor`.
+    async fn signed_in(pool: PgPool, limits: Limits) -> Self {
+        let mut h = Self::new(pool, limits);
+        h.cookie = Some(h.register("doctor").await);
+        h
+    }
+
+    /// The account signed in.
+    async fn user_id(&self) -> Uuid {
+        let (status, user) = self.get("/api/v1/auth/me").await;
+        assert_eq!(status, StatusCode::OK, "{user}");
+        user["id"].as_str().unwrap().parse().unwrap()
     }
 
     /// Fetches Krooster rosters from `base` instead of Krooster itself.
@@ -109,9 +129,28 @@ impl Harness {
         body: Option<&str>,
         headers: &[(&str, &str)],
     ) -> Response<Body> {
+        self.raw_as(self.cookie.as_deref(), method, uri, body, headers)
+            .await
+    }
+
+    /// A request carrying `cookie`, unless `headers` carry one of their own.
+    async fn raw_as(
+        &self,
+        cookie: Option<&str>,
+        method: Method,
+        uri: &str,
+        body: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> Response<Body> {
         let mut req = Request::builder().method(method).uri(uri);
         for (name, value) in headers {
             req = req.header(*name, *value);
+        }
+        let own_cookie = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("cookie"));
+        if let (Some(cookie), false) = (cookie, own_cookie) {
+            req = req.header(header::COOKIE, cookie);
         }
         let body = match body {
             Some(text) => {
@@ -286,7 +325,7 @@ async fn game_data_endpoints(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn every_error_is_json(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
 
     let (status, err) = h.get("/api/v1/nothing").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -304,6 +343,7 @@ async fn every_error_is_json(pool: PgPool) {
     error_of(&err);
 
     let req = Request::post("/api/v1/rosters")
+        .header(header::COOKIE, h.cookie.as_deref().unwrap())
         .body(Body::from("{}"))
         .unwrap();
     let (status, err) = read(h.app.clone().oneshot(req).await.unwrap()).await;
@@ -344,7 +384,7 @@ async fn every_error_is_json(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn text_postgres_cannot_store_is_a_400(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let nul = "names and bodies may not contain NUL (\\u0000) characters";
     // In a name (a text column)…
     let base = example("243-base.json")["base"].clone();
@@ -370,7 +410,7 @@ async fn text_postgres_cannot_store_is_a_400(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn an_unreachable_database_is_a_503(pool: PgPool) {
-    let h = Harness::new(pool.clone(), Limits::default());
+    let h = Harness::signed_in(pool.clone(), Limits::default()).await;
     pool.close().await;
     let (status, err) = h.get("/api/v1/rosters").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -384,7 +424,7 @@ async fn an_unreachable_database_is_a_503(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn simulate_matches_the_library(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let req = example("243-base.json");
 
     let (status, result) = h.post("/api/v1/simulate", req.clone()).await;
@@ -416,13 +456,14 @@ async fn simulate_matches_the_library(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn long_runs_are_refused(pool: PgPool) {
-    let h = Harness::new(
+    let h = Harness::signed_in(
         pool,
         Limits {
             max_ticks: 100,
             ..Limits::default()
         },
-    );
+    )
+    .await;
     // 24 hours at 5 minutes is 288 ticks.
     let (status, err) = h.post("/api/v1/simulate", example("243-base.json")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -441,7 +482,7 @@ async fn long_runs_are_refused(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn rosters_round_trip(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let roster = example("243-base.json")["roster"].clone();
 
     let id = h
@@ -501,7 +542,7 @@ async fn rosters_round_trip(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn bases_are_validated(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let base = example("243-base.json")["base"].clone();
     let id = h.create("bases", json!({ "base": base })).await;
     let (_, doc) = h.get(&format!("/api/v1/bases/{id}")).await;
@@ -523,7 +564,7 @@ async fn bases_are_validated(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn requests_can_name_stored_documents(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let req = example("243-base.json");
     let base_id = h.create("bases", json!({ "base": req["base"] })).await;
     let roster_id = h
@@ -570,7 +611,7 @@ async fn requests_can_name_stored_documents(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn a_solve_runs_in_the_background(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let req = quick_solve();
     let base_id = h.create("bases", json!({ "base": req["base"] })).await;
     let roster_id = h
@@ -639,7 +680,7 @@ async fn a_solve_runs_in_the_background(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn a_bad_solve_is_refused_before_it_is_queued(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let mut req = quick_solve();
     req["solver"]["restarts"] = json!(0);
     let (status, err) = h.post("/api/v1/solves", json!({ "request": req })).await;
@@ -656,7 +697,7 @@ async fn a_bad_solve_is_refused_before_it_is_queued(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn a_running_solve_reports_progress_and_can_be_stopped(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let id = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -688,13 +729,14 @@ async fn a_running_solve_reports_progress_and_can_be_stopped(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn solves_queue_and_can_be_cancelled_or_deleted(pool: PgPool) {
-    let h = Harness::new(
+    let h = Harness::signed_in(
         pool,
         Limits {
             max_running_solves: 1,
             ..Limits::default()
         },
-    );
+    )
+    .await;
     let first = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -735,13 +777,14 @@ async fn solves_queue_and_can_be_cancelled_or_deleted(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn the_server_caps_search_time(pool: PgPool) {
-    let h = Harness::new(
+    let h = Harness::signed_in(
         pool,
         Limits {
             max_solve_ms: 300,
             ..Limits::default()
         },
-    );
+    )
+    .await;
     let id = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -757,37 +800,37 @@ async fn the_server_caps_search_time(pool: PgPool) {
     assert_eq!(job["request"]["solver"]["time_budget_ms"], 100);
 }
 
-/// Writes a solve document straight into a store.
-async fn stored_job(store: &Store, request: &Value, status: JobStatus, attempts: u32) -> String {
+/// Writes one of `owner`'s solve documents straight into a store.
+async fn stored_job(
+    store: &Store,
+    owner: Uuid,
+    request: &Value,
+    status: JobStatus,
+    attempts: u32,
+) -> String {
     let request: SolveRequest = serde_json::from_value(request.clone()).unwrap();
     let mut job = SolveJob::new(request, Refs::default());
     job.status = status;
     job.attempts = attempts;
-    let doc = Document::new(None, serde_json::to_value(&job).unwrap());
+    let doc = Document::new(owner, None, serde_json::to_value(&job).unwrap());
     store.insert(Collection::Solves, &doc).await.unwrap();
     doc.id.to_string()
 }
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn unfinished_solves_resume_after_a_restart(pool: PgPool) {
-    let (interrupted, waiting, doomed, cancelled) = {
-        let store = Store::from_pool(pool.clone());
-        let quick = quick_solve();
-        (
-            stored_job(&store, &quick, JobStatus::Running, 1).await,
-            stored_job(&store, &quick, JobStatus::Pending, 0).await,
-            stored_job(
-                &store,
-                &quick,
-                JobStatus::Running,
-                ak_api::jobs::MAX_ATTEMPTS,
-            )
-            .await,
-            stored_job(&store, &quick, JobStatus::Cancelled, 0).await,
-        )
-    };
-    let h = Harness::new(pool, Limits::default());
-    assert_eq!(ak_api::jobs::resume(&h.state).await.unwrap(), 2);
+    let h = Harness::signed_in(pool, Limits::default()).await;
+    let (store, owner, quick) = (&h.state.store, h.user_id().await, quick_solve());
+    let interrupted = stored_job(store, owner, &quick, JobStatus::Running, 1).await;
+    let waiting = stored_job(store, owner, &quick, JobStatus::Pending, 0).await;
+    let attempts = ak_api::jobs::MAX_ATTEMPTS;
+    let doomed = stored_job(store, owner, &quick, JobStatus::Running, attempts).await;
+    let cancelled = stored_job(store, owner, &quick, JobStatus::Cancelled, 0).await;
+    // Someone else's unfinished solve is picked up too, and stays theirs.
+    let other = User::new("kaltsit".into(), None);
+    assert!(store.create_user(&other, "hash").await.unwrap());
+    let theirs = stored_job(store, other.id, &quick, JobStatus::Pending, 0).await;
+    assert_eq!(ak_api::jobs::resume(&h.state).await.unwrap(), 3);
 
     let job = h.wait_for(&interrupted, "done", is("done")).await;
     assert_eq!(job["attempts"], 2);
@@ -803,12 +846,21 @@ async fn unfinished_solves_resume_after_a_restart(pool: PgPool) {
     let (_, job) = h.get(&format!("/api/v1/solves/{cancelled}")).await;
     assert_eq!(job["status"], "cancelled");
     assert!(job.get("started_at").is_none());
+    let (status, _) = h.get(&format!("/api/v1/solves/{theirs}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    h.wait_idle().await;
+    let theirs = theirs.parse().unwrap();
+    let doc = store
+        .get(other.id, Collection::Solves, theirs)
+        .await
+        .unwrap();
+    assert_eq!(doc.unwrap().body["status"], "done");
 }
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn shutdown_leaves_running_solves_for_the_next_start(pool: PgPool) {
-    let id = {
-        let h = Harness::new(pool.clone(), Limits::default());
+    let (id, cookie) = {
+        let h = Harness::signed_in(pool.clone(), Limits::default()).await;
         let id = h
             .create("solves", json!({ "request": endless_solve() }))
             .await;
@@ -818,9 +870,11 @@ async fn shutdown_leaves_running_solves_for_the_next_start(pool: PgPool) {
         let (_, job) = h.get(&format!("/api/v1/solves/{id}")).await;
         assert_eq!(job["status"], "running");
         assert!(job.get("result").is_none());
-        id
+        (id, h.cookie.clone())
     };
-    let h = Harness::new(pool, Limits::default());
+    // The next start, with the same account still signed in.
+    let mut h = Harness::new(pool, Limits::default());
+    h.cookie = cookie;
     assert_eq!(ak_api::jobs::resume(&h.state).await.unwrap(), 1);
     let job = h
         .wait_for(&id, "running again", |job| job["attempts"] == 2)
@@ -830,7 +884,7 @@ async fn shutdown_leaves_running_solves_for_the_next_start(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn shutdown_waits_for_a_stopped_solve_to_be_recorded(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let id = h
         .create("solves", json!({ "request": endless_solve() }))
         .await;
@@ -884,12 +938,22 @@ impl Harness {
         (status, headers, body)
     }
 
-    /// Registers `username` and returns its session cookie.
+    /// Registers `username` and returns its session cookie. Sent as a
+    /// stranger: signing up ends the session a request carries, and the
+    /// harness's own must survive.
     async fn register(&self, username: &str) -> String {
-        let body = json!({ "username": username, "password": PASSWORD });
-        let (status, headers, user) = self
-            .send(Method::POST, "/api/v1/auth/register", Some(body), &[])
+        let body = json!({ "username": username, "password": PASSWORD }).to_string();
+        let resp = self
+            .raw_as(
+                None,
+                Method::POST,
+                "/api/v1/auth/register",
+                Some(&body),
+                &[],
+            )
             .await;
+        let headers = resp.headers().clone();
+        let (status, user) = read(resp).await;
         assert_eq!(status, StatusCode::CREATED, "{user}");
         session_of(&headers).unwrap()
     }
@@ -1130,6 +1194,195 @@ async fn old_password_hashes_are_upgraded_at_sign_in(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn personal_routes_need_an_account(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    let id = "00000000-0000-0000-0000-000000000000";
+    let personal = [
+        (Method::GET, "/api/v1/auth/me".to_owned()),
+        (Method::POST, "/api/v1/evaluate".to_owned()),
+        (Method::POST, "/api/v1/simulate".to_owned()),
+        (Method::GET, "/api/v1/rosters".to_owned()),
+        (Method::POST, "/api/v1/rosters".to_owned()),
+        (Method::POST, "/api/v1/rosters/preview".to_owned()),
+        (Method::GET, format!("/api/v1/rosters/{id}")),
+        (Method::PUT, format!("/api/v1/rosters/{id}")),
+        (Method::DELETE, format!("/api/v1/rosters/{id}")),
+        (Method::GET, "/api/v1/import/krooster/someone".to_owned()),
+        (Method::GET, "/api/v1/bases".to_owned()),
+        (Method::POST, "/api/v1/bases".to_owned()),
+        (Method::GET, format!("/api/v1/bases/{id}")),
+        (Method::PUT, format!("/api/v1/bases/{id}")),
+        (Method::DELETE, format!("/api/v1/bases/{id}")),
+        (Method::GET, "/api/v1/solves".to_owned()),
+        (Method::POST, "/api/v1/solves".to_owned()),
+        (Method::GET, format!("/api/v1/solves/{id}")),
+        (Method::DELETE, format!("/api/v1/solves/{id}")),
+        (Method::POST, format!("/api/v1/solves/{id}/stop")),
+        (
+            Method::GET,
+            format!("/api/v1/solves/{id}/candidates/0/simulation"),
+        ),
+    ];
+    for (method, uri) in personal {
+        // A body that would be wrong is still refused for want of an
+        // account first.
+        let body = (method == Method::POST || method == Method::PUT).then(|| json!({}));
+        let (status, headers, err) = h.send(method.clone(), &uri, body, &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}: {err}");
+        assert_eq!(error_of(&err), "not signed in");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store", "{method} {uri}");
+    }
+    for uri in [
+        "/healthz",
+        "/api/v1/gamedata/version",
+        "/api/v1/gamedata/layout",
+    ] {
+        let (status, headers, _) = h.send(Method::GET, uri, None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(headers.get(header::CACHE_CONTROL).is_none(), "{uri}");
+    }
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn accounts_see_only_their_own_documents(pool: PgPool) {
+    let h = Harness::signed_in(pool, Limits::default()).await;
+    let sim = example("243-base.json");
+    let roster = h
+        .create(
+            "rosters",
+            json!({ "name": "mine", "roster": sim["roster"] }),
+        )
+        .await;
+    let base = h
+        .create("bases", json!({ "name": "mine", "base": sim["base"] }))
+        .await;
+    let solve = h
+        .create("solves", json!({ "request": quick_solve() }))
+        .await;
+    h.wait_for(&solve, "done", is("done")).await;
+
+    let other = h.register("kaltsit").await;
+    let as_other = |method: Method, uri: String, body: Option<Value>| {
+        let other = other.clone();
+        let h = &h;
+        async move {
+            let (status, _, body) = h.send(method, &uri, body, &[("cookie", &other)]).await;
+            (status, body)
+        }
+    };
+
+    // Someone else's documents are not there: not listed, not readable,
+    // not changeable, not deletable.
+    for (collection, id, body) in [
+        ("rosters", &roster, json!({ "roster": sim["roster"] })),
+        ("bases", &base, json!({ "base": sim["base"] })),
+    ] {
+        let (status, listed) = as_other(Method::GET, format!("/api/v1/{collection}"), None).await;
+        assert_eq!((status, listed), (StatusCode::OK, json!([])));
+        let uri = format!("/api/v1/{collection}/{id}");
+        let (status, _) = as_other(Method::GET, uri.clone(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        let (status, _) = as_other(Method::PUT, uri.clone(), Some(body)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        let (status, _) = as_other(Method::DELETE, uri.clone(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+    }
+    let (status, listed) = as_other(Method::GET, "/api/v1/solves".into(), None).await;
+    assert_eq!((status, listed), (StatusCode::OK, json!([])));
+    for (method, uri) in [
+        (Method::GET, format!("/api/v1/solves/{solve}")),
+        (Method::POST, format!("/api/v1/solves/{solve}/stop")),
+        (
+            Method::GET,
+            format!("/api/v1/solves/{solve}/candidates/0/simulation"),
+        ),
+        (Method::DELETE, format!("/api/v1/solves/{solve}")),
+    ] {
+        let body = (method == Method::POST).then(|| json!({}));
+        let (status, _) = as_other(method.clone(), uri.clone(), body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    // Nor can a request name them.
+    let mut by_ref = sim.clone();
+    by_ref.as_object_mut().unwrap().remove("base");
+    by_ref["base_id"] = json!(base);
+    let (status, err) = as_other(
+        Method::POST,
+        "/api/v1/simulate".into(),
+        Some(by_ref.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error_of(&err).starts_with("no stored base"), "{err}");
+    let (status, _) = h.post("/api/v1/simulate", by_ref).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The owner still has everything.
+    for uri in [
+        format!("/api/v1/rosters/{roster}"),
+        format!("/api/v1/bases/{base}"),
+        format!("/api/v1/solves/{solve}"),
+    ] {
+        let (status, _) = h.get(&uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+    }
+    for collection in ["rosters", "bases", "solves"] {
+        let (_, listed) = h.get(&format!("/api/v1/{collection}")).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{collection}");
+    }
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn other_accounts_cannot_stop_or_delete_a_live_solve(pool: PgPool) {
+    let one_at_a_time = Limits {
+        max_running_solves: 1,
+        ..Limits::default()
+    };
+    let h = Harness::signed_in(pool, one_at_a_time).await;
+    let running = h
+        .create("solves", json!({ "request": endless_solve() }))
+        .await;
+    h.wait_for(&running, "running", is("running")).await;
+    let pending = h
+        .create("solves", json!({ "request": endless_solve() }))
+        .await;
+
+    let other = h.register("kaltsit").await;
+    for id in [&running, &pending] {
+        let stop = format!("/api/v1/solves/{id}/stop");
+        let (status, _, _) = h
+            .send(Method::POST, &stop, Some(json!({})), &[("cookie", &other)])
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{stop}");
+        let uri = format!("/api/v1/solves/{id}");
+        let (status, _, _) = h
+            .send(Method::DELETE, &uri, None, &[("cookie", &other)])
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+    }
+
+    // Untouched: still running with no stop asked for, and still queued.
+    let (_, job) = h.get(&format!("/api/v1/solves/{running}")).await;
+    assert_eq!(job["status"], "running");
+    assert!(job.get("stop_requested").is_none(), "{job}");
+    let (_, job) = h.get(&format!("/api/v1/solves/{pending}")).await;
+    assert_eq!(job["status"], "pending");
+
+    // Their owner still can: the queued one starts once the first ends.
+    let (status, _) = h
+        .post(&format!("/api/v1/solves/{running}/stop"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    h.wait_for(&pending, "running", is("running")).await;
+    let (status, _) = h
+        .post(&format!("/api/v1/solves/{pending}/stop"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    h.wait_idle().await;
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn other_sites_cannot_use_or_start_a_session(pool: PgPool) {
     let h = Harness::new(pool, Limits::default());
     let cookie = h.register("mostima").await;
@@ -1181,7 +1434,7 @@ async fn other_sites_cannot_use_or_start_a_session(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, _) = h
+    let (status, _, err) = h
         .send(
             Method::POST,
             "/api/v1/simulate",
@@ -1189,7 +1442,8 @@ async fn other_sites_cannot_use_or_start_a_session(pool: PgPool) {
             &[("sec-fetch-site", "cross-site")],
         )
         .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_of(&err), "not signed in");
 
     // The site's own pages, and requests the user typed, may.
     for site in ["same-origin", "none"] {
@@ -1209,7 +1463,7 @@ async fn other_sites_cannot_use_or_start_a_session(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn rosters_import_from_other_tools(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let krooster = export("krooster-v3.json");
 
     // A preview reads the export without storing it.
@@ -1347,7 +1601,9 @@ fn fake_krooster() -> (String, Arc<Mutex<Vec<String>>>) {
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn rosters_fetched_from_krooster(pool: PgPool) {
     let (krooster, asked) = fake_krooster();
-    let h = Harness::new(pool, Limits::default()).with_krooster(&krooster);
+    let h = Harness::signed_in(pool, Limits::default())
+        .await
+        .with_krooster(&krooster);
 
     // The profile's roster, without the account details and supports.
     let (status, fetched) = h.get("/api/v1/import/krooster/Example-Doctor").await;
@@ -1408,8 +1664,9 @@ async fn an_unreachable_krooster_is_a_bad_gateway(pool: PgPool) {
         .local_addr()
         .unwrap()
         .port();
-    let h =
-        Harness::new(pool, Limits::default()).with_krooster(&format!("http://127.0.0.1:{port}"));
+    let h = Harness::signed_in(pool, Limits::default())
+        .await
+        .with_krooster(&format!("http://127.0.0.1:{port}"));
     let (status, err) = h.get("/api/v1/import/krooster/example-doctor").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(
@@ -1449,7 +1706,7 @@ async fn layout_and_constants_for_drawing_a_base(pool: PgPool) {
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn every_finalist_can_be_simulated(pool: PgPool) {
-    let h = Harness::new(pool, Limits::default());
+    let h = Harness::signed_in(pool, Limits::default()).await;
     let mut req = quick_solve();
     req["solver"]["top_k"] = json!(3);
     let id = h.create("solves", json!({ "request": req })).await;

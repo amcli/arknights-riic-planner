@@ -9,6 +9,7 @@ use ak_domain::BaseConfig;
 use ak_store::Collection;
 
 use crate::AppState;
+use crate::auth::CurrentUser;
 use crate::error::{ApiError, Body};
 use crate::stored::{self, Stored};
 
@@ -30,21 +31,29 @@ pub struct BaseView {
 /// `POST /api/v1/bases`.
 pub async fn create(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Body(body): Body<BaseBody>,
 ) -> Result<Response, ApiError> {
     body.base.validate(&s.data).map_err(ApiError::bad_request)?;
     let view = BaseView { base: body.base };
-    stored::create(&s, Collection::Bases, body.name, view).await
+    stored::create(&s, user.id, Collection::Bases, body.name, view).await
 }
 
 /// `GET /api/v1/bases`.
-pub async fn list(State(s): State<AppState>) -> Result<Response, ApiError> {
-    Ok(Json(stored::listing(&s, Collection::Bases).await?).into_response())
+pub async fn list(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> Result<Response, ApiError> {
+    Ok(Json(stored::listing(&s, user.id, Collection::Bases).await?).into_response())
 }
 
 /// `GET /api/v1/bases/{id}`.
-pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    let doc = stored::fetch(&s, Collection::Bases, id).await?;
+pub async fn get(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let doc = stored::fetch(&s, user.id, Collection::Bases, id).await?;
     let view: Stored<BaseView> = stored::view(doc)?;
     Ok(Json(view).into_response())
 }
@@ -52,18 +61,20 @@ pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Re
 /// `PUT /api/v1/bases/{id}`.
 pub async fn put(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     Body(body): Body<BaseBody>,
 ) -> Result<Response, ApiError> {
     body.base.validate(&s.data).map_err(ApiError::bad_request)?;
     let view = BaseView { base: body.base };
-    stored::replace(&s, Collection::Bases, id, body.name, view).await
+    stored::replace(&s, user.id, Collection::Bases, id, body.name, view).await
 }
 
 /// `DELETE /api/v1/bases/{id}`.
 pub async fn delete(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    stored::remove(&s, Collection::Bases, id).await
+    stored::remove(&s, user.id, Collection::Bases, id).await
 }

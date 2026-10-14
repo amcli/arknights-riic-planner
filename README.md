@@ -13,10 +13,10 @@ design; this README tracks what actually exists.
 | 3. Domain model | `ak-domain` | **Done.** `BaseConfig` (validated against room limits, layout slots and power), `Assignment` (checked mutators, so it cannot hold an impossible state), `Roster`. |
 | 4. Evaluator / mood sim | `ak-eval` | **Done for production and morale.** Instantaneous evaluator plus a deterministic fixed-tick simulator with rotation, collection and a shared depot. Clue output and resource accumulators are not simulated yet. |
 | 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
-| 6. Persistence | `ak-store` | **Done.** Versioned JSON documents for rosters, bases and solve jobs in Postgres, migrated on read; pooled connections; schema migrations applied by `ak-api migrate`, so the server runs as a role that cannot change the schema. |
-| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. Accounts with password sign-in and cookie sessions. JSON errors throughout, work limits, gzip, opt-in CORS. |
+| 6. Persistence | `ak-store` | **Done.** Versioned JSON documents for rosters, bases and solve jobs in Postgres, each owned by an account, migrated on read; pooled connections; schema migrations applied by `ak-api migrate`, so the server runs as a role that cannot change the schema. |
+| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. Accounts with password sign-in and cookie sessions; everything but the game data, `/healthz` and signing up, in and out needs one, and each sees only its own documents. JSON errors throughout, work limits, gzip, opt-in CORS. |
 | 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (public profile, current, row and legacy shapes; the API fetches a profile by username) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
-| 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines. |
+| 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines; sign-in and account creation. |
 
 **Ingestion coverage (pinned en_US snapshot):** 410 / 410 operators with
 base skills, 715 / 715 skill tiers, 0 skipped under strict mode.
@@ -256,8 +256,10 @@ assignment scores low because two of its Factories are unstaffed.
 
 ## How Layer 6 works
 
-`ak-store` keeps rosters, bases and solve jobs as documents: an id, a
-name, timestamps, a `schema_version` and a JSON body. Bodies are never
+`ak-store` keeps rosters, bases and solve jobs as documents: an id, the
+account that owns it, a name, timestamps, a `schema_version` and a JSON
+body. Every read and write names the owner, so one account can never reach
+another's documents, and an account's documents go when it does. Bodies are never
 decomposed into columns. A document from an older schema is migrated on
 read; one from a newer build is refused rather than guessed at.
 
@@ -340,7 +342,7 @@ the budget that applied.
 username (3 to 32 letters, digits, `_` or `-`, unique regardless of case),
 a password and, optionally, an email address, and signs it in;
 `/auth/login` signs in, `/auth/logout` signs out and `GET /auth/me` answers
-with the account signed in. Nothing else uses accounts yet.
+with the account signed in.
 
 - *Passwords* are 8 to 128 characters of anything, except the username,
   NFKC-normalised so the same password typed on different keyboards
@@ -375,6 +377,16 @@ with the account signed in. Nothing else uses accounts yet.
   the dev proxy or a reverse proxy.
 - Account responses are sent `Cache-Control: no-store`.
 
+**Ownership.** The game data, `/healthz` and signing up, in and out are
+open to everyone; every other route needs a signed-in account and answers
+`401` without one. Each account lists, reads, changes, deletes and names
+(as `base_id` / `roster_id`) only its own rosters, bases and solves;
+another account's answers `404`, exactly as if it did not exist. Solves
+run, are stopped and are written back as their owner's, and after a
+restart each unfinished one is queued again for the account that submitted
+it. These answers, like the account ones, are sent
+`Cache-Control: no-store`.
+
 **Errors** are always JSON, `{ "error": message }`, including malformed
 bodies, unknown routes (`404`) and wrong methods (`405`, with `Allow`).
 Anything wrong in a body is `400`, and shape errors name the path
@@ -388,8 +400,9 @@ otherwise.
 **Transport.** Responses are gzip-compressed when the client accepts it (a
 24-hour simulation shrinks from 41 KB to 4 KB). CORS is off unless
 `--cors-origin` lists origins: the Vite dev server proxies `/api`, so the
-frontend never needs it, and a permissive policy would let any web page
-read and delete stored documents.
+frontend never needs it. CORS never carries credentials, so a listed
+origin can use only the public game data and `/healthz`; everything that
+needs an account works only same-origin.
 
 ## How Layer 8 works
 
@@ -452,7 +465,15 @@ cargo run -p ak-cli -- import ak-planner plan.json --out roster.json  # write th
 ## How Layer 9 works
 
 The frontend (`frontend/`, Vite + React + TypeScript, no router or chart
-library) has one screen per step, switched by the URL hash:
+library) has one screen per step, switched by the URL hash. Rosters, Base,
+Plan and Results belong to an account: while nobody is signed in they show
+a sign-in card instead, which can also create an account. The header shows
+who is signed in, with a Sign out button, and a sign-in or sign-out in
+another tab is followed at once. If a session instead ends under an open
+screen (it expired), the next request brings back the sign-in card, and
+the screen stays behind it with anything unsaved until the same account
+signs in again; another account gets fresh screens. Remembered picks (the
+last roster and base) are forgotten when a different account signs in.
 
 - **Rosters** (`#/rosters`): fetch a Krooster roster by username, or paste
   or open another tool's export (or the canonical JSON), preview what it
@@ -481,7 +502,8 @@ library) has one screen per step, switched by the URL hash:
   came on is named in one line rather than charted. Finalists other than
   the best are simulated on request, the way the solve scored them.
 - **Game data** (`#/data`): provenance, every operator, and the raw
-  simulate and solve panels for developers.
+  simulate and solve panels for developers. The panels need a signed-in
+  account, since requests run on one; the rest is public.
 
 The chart colours are the first three slots of a palette validated for
 colour-blind separation in light and dark mode; every coloured thing also
@@ -611,7 +633,7 @@ variables win over it. Keep database URLs out of flags, which other users
 of the machine can see, and add `?sslmode=verify-full` to any URL that
 leaves the machine.
 
-API endpoints:
+API endpoints. All but the game data, `/healthz` and signing up, in or out need a signed-in account (`401` without one), and act only on that account's documents:
 
 - `GET /healthz`
 - `POST /api/v1/auth/register` — body `{ username, password, email? }`, answers `201` with the account and a session cookie, `409` if the username is taken
