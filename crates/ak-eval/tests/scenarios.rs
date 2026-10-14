@@ -491,6 +491,12 @@ fn unmodeled_parts_are_reported_not_dropped() {
         let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
         if !snap.warnings.is_empty() {
             reported += 1;
+            // The model cannot say what the skill does, so its owner counts.
+            assert!(
+                counted(&snap, &op.id),
+                "{} warned but did not count",
+                partial.id
+            );
         }
     }
     assert!(
@@ -1062,4 +1068,261 @@ fn dorm_group_recovery_takes_only_the_strongest_across_families() {
     let best = a_all.max(b_all);
     approx(skills(&a), best, 1e-9);
     approx(skills(&b), best + b_self, 1e-9);
+}
+
+// ---- Who counts --------------------------------------------------------------
+
+/// Whether `op` counted in `snap`: see `MoodRate::counted`.
+fn counted(snap: &Snapshot, op: &OperatorId) -> bool {
+    snap.mood
+        .iter()
+        .find(|m| &m.operator == op)
+        .unwrap_or_else(|| panic!("{op} is not stationed"))
+        .counted
+}
+
+#[test]
+fn an_operator_whose_skills_do_nothing_there_is_filler() {
+    // An order efficiency holder counts in a Trading Post; an operator with
+    // no Trading Post skills adds only the +1% anyone would.
+    let (trader, _) = holder_of("trade_ord_spd");
+    let filler =
+        without_skills_for_excluding(RoomType::Trading, 1, std::slice::from_ref(&trader)).remove(0);
+    let b = base(vec![Room::new("t1", RoomType::Trading, 3)]);
+    let a = assign(&b, &[("t1", &[trader.clone(), filler.clone()])]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &trader));
+    assert!(!counted(&snap, &filler));
+
+    // Over a run, the report names the room they were filler in.
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    assert!(report(&trader).filler_in.is_empty());
+    assert_eq!(report(&filler).filler_in, vec![RoomId::new("t1")]);
+}
+
+#[test]
+fn operators_a_skill_picks_out_by_group_count() {
+    // "All Knight Operators assigned to Factories gain productivity": with
+    // its owner in the Control Center the Knights count, though their own
+    // skills do nothing in a Factory. A non-Knight beside them does not.
+    let (owner, _) = holder_of("control_prod_fraction");
+    let pool = without_skills_for_excluding(RoomType::Manufacture, 3, std::slice::from_ref(&owner));
+    let mut config = SimConfig::default();
+    config
+        .memberships
+        .tags
+        .insert("knight".into(), pool[..2].iter().cloned().collect());
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("cc", std::slice::from_ref(&owner)), ("f1", &pool)]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &config).unwrap();
+    assert!(counted(&snap, &owner));
+    assert!(counted(&snap, &pool[0]) && counted(&snap, &pool[1]));
+    assert!(!counted(&snap, &pool[2]));
+
+    // Without the owner, nothing picks them out.
+    let a = assign(&b, &[("f1", &pool)]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &config).unwrap();
+    assert!(pool.iter().all(|op| !counted(&snap, op)));
+}
+
+#[test]
+fn a_coworker_whose_bonus_automation_zeroes_is_filler() {
+    // Automation zeroes the productivity skills of the others in its
+    // Factory, so a Standardization holder beside it adds nothing that an
+    // operator without skills would not. The Automation holder counts (here
+    // through their own per-Power-Plant bonus).
+    let (auto, _) = holder_of("manu_prod_spd&power");
+    let std_skill = BuffId::new("manu_prod_spd[000]");
+    let std_op = data()
+        .operators
+        .values()
+        .find(|o| o.active_buffs(UnlockCond::BASE) == vec![&std_skill] && o.id != auto)
+        .unwrap()
+        .id
+        .clone();
+    let mut roster = maxed();
+    roster.insert(std_op.clone(), RosterEntry::at(UnlockCond::BASE));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[auto.clone(), std_op.clone()])]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &auto));
+    assert!(!counted(&snap, &std_op));
+
+    // On their own, Standardization counts.
+    let a = assign(&b, &[("f1", std::slice::from_ref(&std_op))]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &std_op));
+}
+
+#[test]
+fn a_morale_skill_counts_its_owner() {
+    // Restoring everyone's morale in a Dormitory counts; resting beside them
+    // does not.
+    let (healer, _) = holder_of("dorm_rec_all");
+    let resting =
+        without_skills_for_excluding(RoomType::Dormitory, 1, std::slice::from_ref(&healer))
+            .remove(0);
+    let b = base(vec![Room::new("d1", RoomType::Dormitory, 5)]);
+    let a = assign(&b, &[("d1", &[healer.clone(), resting.clone()])]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &healer));
+    assert!(!counted(&snap, &resting));
+
+    // Resting is not working: nobody in a Dormitory is filler.
+    let r = simulate(data(), &request(b, a)).unwrap();
+    for o in &r.operators {
+        assert!(o.worked_in.is_empty() && o.filler_in.is_empty(), "{o:?}");
+    }
+}
+
+#[test]
+fn a_trainee_is_never_filler() {
+    // A trainee is idle, so never works: whatever their skills, they are
+    // not filler. An assistant with no Training Room skills is.
+    let pool = without_skills_for(RoomType::Training, 2);
+    let b = base(vec![training_room(true)]);
+    let a = assign(&b, &[("tr", &pool)]);
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    assert_eq!(report(&pool[0]).filler_in, vec![RoomId::new("tr")]);
+    assert!(report(&pool[1]).filler_in.is_empty());
+}
+
+#[test]
+fn a_named_coworker_counts() {
+    // Alanna's "Here to Help!": Precious Metal productivity +15% when Warmy
+    // is in the same Factory. Before Elite 2 Warmy has no Factory skill of
+    // her own, yet she counts; anyone else in her place does not.
+    let alanna = by_name("Alanna");
+    let warmy = by_name("Warmy");
+    let mut roster = maxed();
+    roster.insert(warmy.clone(), RosterEntry::at(UnlockCond::BASE));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[alanna.clone(), warmy.clone()])]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &warmy));
+
+    let other =
+        without_skills_for_excluding(RoomType::Manufacture, 1, &[alanna.clone(), warmy.clone()])
+            .remove(0);
+    let a = assign(&b, &[("f1", &[alanna, other.clone()])]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(!counted(&snap, &other));
+}
+
+#[test]
+fn a_resource_skill_counts_who_it_counts() {
+    // Chongyue gains Worldly Plight for each Sui operator in a work area.
+    // The resource is not simulated, but Nian (Sui, no Power Plant skills)
+    // still counts in a Power Plant; a non-Sui operator there does not.
+    let chongyue = by_name("Chongyue");
+    let nian = by_name("Nian");
+    let sui = |id: &OperatorId| {
+        data().operators[id.as_str()]
+            .powers()
+            .any(|p| p.as_str() == "sui")
+    };
+    assert!(sui(&chongyue) && sui(&nian));
+    let b = base(vec![Room::new("p1", RoomType::Power, 3)]);
+    let a = assign(
+        &b,
+        &[
+            ("cc", std::slice::from_ref(&chongyue)),
+            ("p1", std::slice::from_ref(&nian)),
+        ],
+    );
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &nian));
+
+    let other = without_skills_for_excluding(RoomType::Power, 40, &[chongyue.clone(), nian])
+        .into_iter()
+        .find(|o| !sui(o))
+        .unwrap();
+    let a = assign(
+        &b,
+        &[
+            ("cc", std::slice::from_ref(&chongyue)),
+            ("p1", std::slice::from_ref(&other)),
+        ],
+    );
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(!counted(&snap, &other));
+}
+
+#[test]
+fn nobody_working_in_the_reception_room_is_filler() {
+    // Its clue speed also rises with each occupant's rarity and promotion,
+    // which is not modelled, so the model cannot say anyone there does
+    // nothing, skills or not.
+    let op = without_skills_for(RoomType::Meeting, 1);
+    let b = base(vec![Room::new("r1", RoomType::Meeting, 3)]);
+    let a = assign(&b, &[("r1", &op)]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &op[0]));
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let report = r.operators.iter().find(|o| o.id == op[0]).unwrap();
+    assert_eq!(report.worked_in, vec![RoomId::new("r1")]);
+    assert!(report.filler_in.is_empty());
+}
+
+#[test]
+fn a_scaler_counts_when_it_has_something_to_scale() {
+    // With Automation cut down to "others' productivity becomes 0" alone, its
+    // holder adds nothing of their own, yet counts for zeroing a coworker's
+    // Standardization.
+    let mut d = data().clone();
+    for s in d.skills.values_mut() {
+        if s.id.as_str().starts_with("manu_prod_spd&power") {
+            let clauses = &mut s.mechanics.as_mut().unwrap().clauses;
+            assert!(matches!(
+                clauses[0].effect,
+                Effect::ScaleOthersContribution { .. }
+            ));
+            clauses.truncate(1);
+        }
+    }
+    let (auto, _) = holder_of("manu_prod_spd&power");
+    let std_skill = BuffId::new("manu_prod_spd[000]");
+    let std_op = d
+        .operators
+        .values()
+        .find(|o| o.active_buffs(UnlockCond::BASE) == vec![&std_skill] && o.id != auto)
+        .unwrap()
+        .id
+        .clone();
+    let mut roster = maxed();
+    roster.insert(std_op.clone(), RosterEntry::at(UnlockCond::BASE));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[auto.clone(), std_op.clone()])]);
+    let snap = evaluate(&d, &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &auto));
+    assert!(!counted(&snap, &std_op));
+
+    // Alone, it has nothing to scale.
+    let a = assign(&b, &[("f1", std::slice::from_ref(&auto))]);
+    let snap = evaluate(&d, &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(!counted(&snap, &auto));
+}
+
+#[test]
+fn a_report_stored_before_filler_tracking_still_reads() {
+    // Stored solves keep their simulation; one saved before `worked_in` and
+    // `filler_in` existed must still load, with neither known.
+    let op = without_skills_for(RoomType::Manufacture, 1);
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &op)]);
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let mut v = serde_json::to_value(&r).unwrap();
+    for o in v["operators"].as_array_mut().unwrap() {
+        let o = o.as_object_mut().unwrap();
+        o.remove("worked_in");
+        o.remove("filler_in");
+    }
+    let old: SimResult = serde_json::from_value(v).unwrap();
+    assert!(
+        old.operators
+            .iter()
+            .all(|o| o.worked_in.is_empty() && o.filler_in.is_empty())
+    );
 }

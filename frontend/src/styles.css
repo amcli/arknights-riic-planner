@@ -746,6 +746,30 @@ input[type="number"] {
   width: 100%;
 }
 
+input[type="range"] {
+  height: 30px;
+  margin: 0;
+  border-radius: var(--radius-sm);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+input[type="range"]:focus {
+  box-shadow: none;
+}
+
+input[type="range"]:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+/* A slider with the exact number beside it. */
+.slider-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: center;
+  gap: 12px;
+}
+
 .inline {
   display: inline-flex;
   align-items: center;
@@ -2446,6 +2470,10 @@ table.morale tr.group th {
 
 .base-map .op-new {
   font-weight: 700;
+}
+
+.base-map .op-filler {
+  fill: var(--muted);
 }
 
 /* ---- game data ------------------------------------------------------------------------ */

@@ -1,7 +1,7 @@
 // Display helpers: numbers, names of things the data only has ids for, and
 // error text.
 
-import type { Formula, Profession, Roster, RoomType } from "./api";
+import type { AssignmentMap, Formula, OperatorReport, Profession, Roster, RoomType, SimResult } from "./api";
 
 export const fmt = (n: number, digits = 0) =>
   n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -57,6 +57,28 @@ const ITEM_NAMES: Record<string, string> = {
 };
 
 export const itemName = (id: string) => ITEM_NAMES[id] ?? `item ${id}`;
+
+/** Shown in place of an operator who was filler where they stood. */
+export const FILLER = "Filler unit";
+
+/**
+ * Who in `assignment` was filler in their room over `sim`: none of their
+ * skills took effect there and nothing picked them out by who they are, so
+ * any operator without skills for the room would have done the same.
+ */
+export function fillersIn(assignment: AssignmentMap, sim?: SimResult): Set<string> {
+  const rooms = new Map((sim?.operators ?? []).map((o) => [o.id, o.filler_in]));
+  const out = new Set<string>();
+  for (const [room, ops] of Object.entries(assignment)) {
+    for (const op of ops) if (op !== null && rooms.get(op)?.includes(room)) out.add(op);
+  }
+  return out;
+}
+
+/** Whether an operator was filler everywhere they worked over a run. */
+export function fillerEverywhere(o: OperatorReport): boolean {
+  return o.worked_in.length > 0 && o.worked_in.every((room) => o.filler_in.includes(room));
+}
 
 /**
  * A formula's name: what it makes, what it is made from when another

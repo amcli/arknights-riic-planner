@@ -7,11 +7,11 @@
 //! - [`Breakdown::proxy`] extrapolates an instantaneous [`Snapshot`] over
 //!   the horizon. It uses the same production rules as the simulator (see
 //!   `ak_eval::rules`), a shared depot with the trading posts limited to
-//!   the gold and shards the factories make, and, without rotation, each
-//!   operator's contribution stopping when their morale would hit zero. It
-//!   ignores the order queue, storage limits and input stock, so it is a
-//!   ranking device, not a report: the finalists are re-scored by the
-//!   simulator.
+//!   the starting stock plus the gold and shards the factories make, and,
+//!   without rotation, each operator's contribution stopping when their
+//!   morale would hit zero. It ignores the order queue, storage limits and
+//!   Factory input stock, so it is a ranking device, not a report: the
+//!   finalists are re-scored by the simulator.
 
 use std::collections::HashMap;
 
@@ -47,7 +47,9 @@ pub struct Objective {
     pub contacts: f64,
     /// Per base hour of specialisation training completed.
     pub training_hours: f64,
-    /// Per Pure Gold produced and not sold within the horizon.
+    /// Per Pure Gold produced and not sold within the horizon. Gold sold
+    /// from the starting stock counts against it, so a weight here also
+    /// prices drawing the depot down.
     pub gold: f64,
     /// Penalty per operator-hour spent stationed at zero morale.
     pub exhausted_hour: f64,

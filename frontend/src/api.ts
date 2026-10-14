@@ -217,6 +217,10 @@ export interface OperatorReport {
   hours_exhausted: number;
   hours_benched: number;
   hours_idle: number;
+  /** Work rooms they worked in (stationed, not idle). */
+  worked_in: string[];
+  /** Those of `worked_in` where any operator without skills there would have done the same. */
+  filler_in: string[];
 }
 
 export interface SimEvent {
@@ -273,6 +277,11 @@ export interface MoodRate {
   total: number;
   exhausted: boolean;
   idle: boolean;
+  /**
+   * A skill of theirs took effect, the model could not tell what one does, another skill picked them out by who they
+   * are, or they work in the Reception Room.
+   */
+  counted: boolean;
 }
 
 export interface Contribution {
@@ -339,7 +348,7 @@ export interface StoredSolveRequest {
   roster: Roster;
   initial?: AssignmentMap | null;
   locked?: Slot[];
-  config: { horizon_hours: number; tick_minutes: number } & Record<string, unknown>;
+  config: { horizon_hours: number; tick_minutes: number; initial_gold: number } & Record<string, unknown>;
   rotation: { kind: "none" } | { kind: "mood_threshold"; swap_out: number; swap_in: number; bench?: string[] };
   objective: Record<string, number>;
   solver: Record<string, unknown>;

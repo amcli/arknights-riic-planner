@@ -15,15 +15,31 @@ import {
   type SolveSummary,
   type Tagged,
 } from "../api";
-import { BaseMap, diffRoom, toneOf } from "../components/BaseMap";
+import { BaseMap, diffRoom, toneOf, type Fillers } from "../components/BaseMap";
 import { IconAlert, IconChevronLeft, IconPlus, IconResults, IconStop, IconTrash } from "../components/icons";
 import { MoraleTable, type MoraleView } from "../components/MoraleTable";
 import { Callout, Empty, PageHeader, Segmented, StatusBadge } from "../components/ui";
 import { useGameData } from "../data";
-import { ago, change, compact, errorText, fmt, itemName, perDay, roomName, short, when } from "../format";
+import {
+  ago,
+  change,
+  compact,
+  errorText,
+  FILLER,
+  fillersIn,
+  fmt,
+  itemName,
+  perDay,
+  roomName,
+  short,
+  when,
+} from "../format";
 import { href } from "../router";
 
 const FINISHED = new Set(["done", "failed", "cancelled"]);
+
+/** Upstream item id of Pure Gold. */
+const PURE_GOLD = "3003";
 
 export function ResultsView({ id }: { id?: string }) {
   return id ? <SolveDetail key={id} id={id} /> : <SolveList />;
@@ -192,6 +208,7 @@ function SolveDetail({ id }: { id: string }) {
               Roster <strong>{refName(job.refs?.roster_id)}</strong>
             </li>
             <li>{fmt(job.request.config.horizon_hours)} h horizon</li>
+            {job.request.config.initial_gold > 0 && <li>{fmt(job.request.config.initial_gold)} Pure Gold in the depot</li>}
             <li>
               {rotation.kind === "mood_threshold"
                 ? `rotating tired operators (rest at ${fmt(rotation.swap_out)}, back at ${fmt(rotation.swap_in)})`
@@ -311,6 +328,20 @@ function Finished({ job }: { job: SolveJob }) {
     baseline === "best" && selected !== 0 ? best.assignment : baseline === "start" && !startEmpty ? result.initial.assignment : undefined;
   const sim = sims.get(selected);
   const base = job.request.base;
+  // Filler in the finalist shown, and in the best when changes are marked
+  // against it; the start has no simulation to tell. Until the finalist's
+  // own simulation arrives, everyone is named.
+  const fillers: Fillers = sim
+    ? {
+        now: fillersIn(candidate.assignment, sim),
+        before: against === best.assignment ? fillersIn(best.assignment, sims.get(0)) : undefined,
+      }
+    : {};
+  // Whether "Filler unit" appears anywhere below, so the term is explained.
+  const fillerShown =
+    (fillers.now?.size ?? 0) > 0 ||
+    (fillers.before?.size ?? 0) > 0 ||
+    (sim?.operators.some((o) => o.filler_in.length > 0) ?? false);
 
   // A finalist's outputs per day, naming only what any finalist makes.
   const everyone = [...result.candidates, result.initial];
@@ -394,9 +425,16 @@ function Finished({ job }: { job: SolveJob }) {
               base={base}
               assignment={candidate.assignment}
               baseline={against}
+              fillers={fillers}
               label={`Where every operator goes in ${selected === 0 ? "the best assignment" : `finalist ${selected + 1}`}`}
             />
-            {against && <Changes base={base} now={candidate.assignment} before={against} />}
+            {fillerShown && (
+              <p className="tiny muted">
+                {FILLER}: none of their skills did anything in that room and no other skill counted on who they are, so
+                any operator without skills there does the same.
+              </p>
+            )}
+            {against && <Changes base={base} now={candidate.assignment} before={against} fillers={fillers} />}
           </div>
         </div>
       </section>
@@ -418,6 +456,7 @@ function Finished({ job }: { job: SolveJob }) {
             </p>
           )}
           {sim && <RoomTable sim={sim} horizon={horizon} />}
+          {sim && <GoldFlow sim={sim} start={job.request.config.initial_gold} horizon={horizon} />}
         </section>
 
         {sim && sim.warnings.length > 0 && (
@@ -505,10 +544,22 @@ function Tiles({ c, reference, referenceLabel, horizon }: { c: Candidate; refere
   );
 }
 
-function Changes({ base, now, before }: { base: SolveJob["request"]["base"]; now: AssignmentMap; before: AssignmentMap }) {
+function Changes({
+  base,
+  now,
+  before,
+  fillers,
+}: {
+  base: SolveJob["request"]["base"];
+  now: AssignmentMap;
+  before: AssignmentMap;
+  fillers: Fillers;
+}) {
   const { name } = useGameData();
+  const nowName = (op: string) => (fillers.now?.has(op) ? FILLER : name(op));
+  const beforeName = (op: string) => (fillers.before?.has(op) ? FILLER : name(op));
   const rows = base.rooms
-    .map((room) => ({ room, ...diffRoom(room.id, now, before) }))
+    .map((room) => ({ room, ...diffRoom(room.id, now, before, fillers) }))
     .filter((r) => r.added.length > 0 || r.removed.length > 0);
   if (rows.length === 0) return <p className="muted small">No changes.</p>;
   return (
@@ -522,8 +573,8 @@ function Changes({ base, now, before }: { base: SolveJob["request"]["base"]; now
             <span className="room">
               {roomName(room.kind)} <span className="id">{room.id}</span>
             </span>
-            {added.length > 0 && <span className="added"> + {added.map(name).join(", ")}</span>}
-            {removed.length > 0 && <span className="removed"> − {removed.map(name).join(", ")}</span>}
+            {added.length > 0 && <span className="added"> + {added.map(nowName).join(", ")}</span>}
+            {removed.length > 0 && <span className="removed"> − {removed.map(beforeName).join(", ")}</span>}
           </li>
         ))}
       </ul>
@@ -534,6 +585,8 @@ function Changes({ base, now, before }: { base: SolveJob["request"]["base"]; now
 function RoomTable({ sim, horizon }: { sim: SimResult; horizon: number }) {
   const { name, facilities } = useGameData();
   const day = (v: number) => perDay(v, horizon);
+  const fillerIn = new Map(sim.operators.map((o) => [o.id, o.filler_in]));
+  const who = (op: string, room: string) => (fillerIn.get(op)?.includes(room) ? FILLER : name(op));
   const output = (r: SimResult["rooms"][number]) => {
     const parts: string[] = [];
     for (const [item, n] of Object.entries(r.produced)) parts.push(`${fmt(day(n), 2)} ${itemName(item)}`);
@@ -573,12 +626,34 @@ function RoomTable({ sim, horizon }: { sim: SimResult; horizon: number }) {
                 {output(r) || <span className="muted">nothing</span>}
                 {r.hours_blocked > 0 && <span className="blocked"> · full for {fmt(r.hours_blocked, 1)} h</span>}
               </td>
-              <td>{r.operators.map(name).join(", ")}</td>
+              <td>{r.operators.map((op) => who(op, r.id)).join(", ")}</td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** Where the Pure Gold went over the horizon, and whether the Trading Posts ran short of it. */
+function GoldFlow({ sim, start, horizon }: { sim: SimResult; start: number; horizon: number }) {
+  const { gold_produced: made, gold_consumed: sold, gold_in_depot: left } = sim.totals;
+  // Posts that ran short and caught up again end with gold to spare; only a
+  // shortage that lasts until the depot ends empty capped what they sold.
+  const short = left < 0.05 && sim.events.some((e) => e.kind.kind === "input_starved" && e.kind.item === PURE_GOLD);
+  if (!short && start === 0 && made === 0 && sold === 0) return null;
+  return (
+    <p className="card-foot muted small">
+      Pure Gold over the {fmt(horizon)} h: {fmt(start)} in the depot at the start, {fmt(made, 1)} made, {fmt(sold, 1)} sold,{" "}
+      {fmt(left, 1)} left.
+      {short && (
+        <>
+          {" "}
+          The Trading Posts ran short of it, so LMD was capped by Pure Gold rather than by who works there. If your
+          depot holds more, enter it in <a href={href("plan")}>Plan</a>.
+        </>
+      )}
+    </p>
   );
 }
 

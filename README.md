@@ -139,6 +139,13 @@ the AST alone does not settle:
   counts toward headcount relief, but applies no skills and no base bonus.
 - **Idle operators.** Training Room trainees, and assistants with no
   training running, neither work nor rest.
+- **Who counts.** An operator counts when one of their skills took effect,
+  when the model could not tell what one of their skills does, when another
+  skill picked them out by name, faction, class or skill, or when they work
+  in the Reception Room (whose rarity and promotion bonuses are not
+  modelled). Anyone else working is filler: any operator without skills for
+  the room would do the same there. A simulation reports, per operator, the
+  rooms they were filler in.
 
 ### Simulating a horizon
 
@@ -216,14 +223,15 @@ the ground truth the annealer is tested against.
 **Two scorers.** Inside the loop, candidates are scored by a steady-state
 proxy: the instantaneous evaluator, extrapolated over the horizon with the
 simulator's own production rules and a shared depot (Trading Posts can sell
-no more gold than the Factories make). Morale is priced as time. Without
-rotation an operator's contribution stops when their morale would hit zero.
-Under rotation they work until `swap_out` and then alternate work and rest,
-so their contribution is scaled by `recovery / (recovery + drain)`, where
-`recovery` is the best Dormitory's rate. The proxy takes about 0.2 ms; a
-24-hour simulation about 40 ms. The finalists are then re-scored by the full
-simulator and ranked by that, with the best one's simulation returned in
-full. On the example bases the proxy lands within 0.5% of the simulator.
+no more Pure Gold or Shards than the starting stock plus what the Factories
+make). Morale is priced as time. Without rotation an operator's contribution
+stops when their morale would hit zero. Under rotation they work until
+`swap_out` and then alternate work and rest, so their contribution is scaled
+by `recovery / (recovery + drain)`, where `recovery` is the best Dormitory's
+rate. The proxy takes about 0.2 ms; a 24-hour simulation about 40 ms. The
+finalists are then re-scored by the full simulator and ranked by that, with
+the best one's simulation returned in full. On the example bases the proxy
+lands within 0.5% of the simulator.
 
 **Objective.** A weighted sum over the horizon. Defaults are cost-based
 where a cost exists and documented in `ak_solver::Objective`: LMD and EXP at
@@ -485,8 +493,9 @@ last roster and base) are forgotten when a different account signs in.
   server validates with; and the base on the in-game floor plan
   (`building_data.layouts.v0`), each room in a slot of its category and
   size.
-- **Plan** (`#/plan`): a stored base and roster, the horizon (24 h, 72 h, a
-  week), rotation thresholds, the objective weights with their defaults,
+- **Plan** (`#/plan`): a stored base and roster, the Pure Gold already in
+  the depot (a slider or an exact number), the horizon (24 h, 72 h, a week),
+  rotation thresholds, the objective weights with their defaults,
   operators pinned to rooms (sent as the starting assignment plus locked
   slots), and an effort preset (Quick, Standard, Thorough) that sets
   iterations, restarts and the time budget. It defaults to 72 hours with
@@ -494,7 +503,11 @@ last roster and base) are forgotten when a different account signs in.
 - **Results** (`#/results/{id}`): live progress with a Stop button while the
   solve runs; then per-day tiles against the start, the finalists with their
   trade-offs, the chosen finalist on the floor plan with changes against the
-  best (or the start) outlined and listed, output per room per day, morale
+  best (or the start) outlined and listed, with operators who were filler
+  in their room shown as "Filler unit" there and in the tables below (one
+  filler swapped for another is no change against the best), output per
+  room per day with where the Pure Gold went and whether the posts ran
+  short of it, morale
   as one sparkline per operator grouped by room with the lowest reading and
   any hours exhausted (hover or arrow keys for a reading; exhaustion is
   marked with a dot and the hours), or as a table with hours working and
