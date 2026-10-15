@@ -171,9 +171,14 @@ Working rooms drain 1.0 morale per hour. Factories and Trading Posts drain
 Control Center operator takes 0.05 per hour off every working operator.
 Dormitories restore 1.5 + 0.1 × level + 0.0004 × ambience per hour.
 
-`mood_threshold` rotation sends a working operator to a free Dormitory slot
-at `swap_out` morale, fills the slot with the best-rested bench operator at
-or above `swap_in`, and brings the original back at `swap_in`.
+`mood_threshold` rotation relieves a working operator at `swap_out` morale
+with the best-rested substitute at or above `swap_in`: a bench operator,
+or anyone resting in a Dormitory except its support (those whose skills
+raise others' morale there after stacking, or whom another operator's
+skill needs there), so the residents a plan puts in the Dormitories are
+its second shift. The tired operator takes a free bed, or trades places
+with a substitute resting in one, and trades back once rested to
+`swap_in`. With no bed and no rested substitute, they work on.
 
 Every number that is not in the data files is in
 [`crates/ak-eval/src/rules.rs`](crates/ak-eval/src/rules.rs) with its source
@@ -258,7 +263,7 @@ morale is free, so without rotation the solver will happily dismantle a
 Control Center morale crew to put bodies in Factories. Enable rotation or
 lengthen the horizon and the crew earns its keep: on the example base with
 `mood_threshold` rotation over 72 hours, the solver keeps most of Team
-Rainbow in the Control Center and lifts the score from 122 k to 223 k in
+Rainbow in the Control Center and lifts the score from 122 k to 225 k in
 about two seconds (6 100 proxy evaluations, 7 simulations). The starting
 assignment scores low because two of its Factories are unstaffed.
 

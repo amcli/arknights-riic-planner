@@ -108,10 +108,12 @@ export function MoraleTable({
   }
   for (const list of byOp.values()) list.sort((a, b) => a.hour - b.hour);
   const reports = new Map(sim.operators.map((o) => [o.id, o]));
-  // Relief operators included: whoever was filler wherever they worked.
-  const label = (op: string) => {
+  // In a room's group, filler there, as on the floor plan; the relief group
+  // has no room, so filler wherever they worked.
+  const label = (op: string, room?: string) => {
     const r = reports.get(op);
-    return r && fillerEverywhere(r) ? FILLER : name(op);
+    const filler = r && (room === undefined ? fillerEverywhere(r) : r.filler_in.includes(room));
+    return filler ? FILLER : name(op);
   };
 
   const groups: { key: string; title: string; id?: string; ops: string[] }[] = [];
@@ -141,9 +143,9 @@ export function MoraleTable({
     </details>
   );
 
-  const describe = (op: string, samples: Sample[]) => {
+  const describe = (op: string, samples: Sample[], room?: string) => {
     const r = reports.get(op);
-    return `${label(op)}: morale from ${fmt(samples[0]?.mood ?? 0, 1)} to ${fmt(samples.at(-1)?.mood ?? 0, 1)}, lowest ${fmt(r?.min_mood ?? 0, 1)}`;
+    return `${label(op, room)}: morale from ${fmt(samples[0]?.mood ?? 0, 1)} to ${fmt(samples.at(-1)?.mood ?? 0, 1)}, lowest ${fmt(r?.min_mood ?? 0, 1)}`;
   };
 
   if (view === "chart") {
@@ -168,8 +170,8 @@ export function MoraleTable({
                 const exhausted = r?.hours_exhausted ?? 0;
                 return (
                   <div key={op} className={rowClass}>
-                    <span className="morale-name" title={label(op)}>
-                      {label(op)}
+                    <span className="morale-name" title={label(op, g.id)}>
+                      {label(op, g.id)}
                     </span>
                     {samples.length > 1 ? (
                       <Sparkline
@@ -178,7 +180,7 @@ export function MoraleTable({
                         max={24}
                         width={104}
                         height={22}
-                        label={describe(op, samples)}
+                        label={describe(op, samples, g.id)}
                       />
                     ) : (
                       <span className="muted tiny">idle</span>
@@ -231,7 +233,7 @@ export function MoraleTable({
               const exhausted = (r?.hours_exhausted ?? 0) > 0;
               return (
                 <tr key={op}>
-                  <td>{label(op)}</td>
+                  <td>{label(op, g.id)}</td>
                   <td>
                     {samples.length > 1 ? (
                       <Sparkline
@@ -240,7 +242,7 @@ export function MoraleTable({
                         max={24}
                         width={200}
                         height={26}
-                        label={describe(op, samples)}
+                        label={describe(op, samples, g.id)}
                       />
                     ) : (
                       <span className="muted small">idle</span>

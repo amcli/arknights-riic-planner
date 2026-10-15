@@ -43,7 +43,8 @@
 //! Room, whose clue speed also rises with each occupant's rarity and
 //! promotion (not modelled, see `crate::rules`). Anyone else working is
 //! filler: any operator without skills for the room would do the same in
-//! their place.
+//! their place. Those whose being there does something for others, a
+//! Dormitory's support above all, are marked as supporting it.
 
 use std::collections::BTreeMap;
 
@@ -227,6 +228,11 @@ pub struct MoodRate {
     /// could be swapped for any operator without skills there and nothing
     /// would change.
     pub counted: bool,
+    /// True when their being here does something for another operator: a
+    /// skill of theirs raises, or would raise, another's morale after
+    /// stacking (Dormitory support, even while everyone there is rested), or
+    /// another operator's skill needs them in this room.
+    pub supports: bool,
 }
 
 /// Everything the evaluator computes for one instant.
@@ -263,6 +269,8 @@ pub fn evaluate(world: &World<'_>, dynamic: &Dynamic<'_>, warnings: &mut Warning
         exhausted: vec![false; n],
         idle: vec![false; n],
         counted: vec![false; n],
+        supports: vec![false; n],
+        probes: Vec::new(),
         extra_rooms: BTreeMap::new(),
         stats: Vec::new(),
         moods: Vec::new(),
@@ -317,6 +325,11 @@ struct Eval<'e, 'a> {
     idle: Vec<bool>,
     /// See [`MoodRate::counted`].
     counted: Vec<bool>,
+    /// See [`MoodRate::supports`].
+    supports: Vec<bool>,
+    /// Morale a skill would give a tired newcomer to its room, for rooms
+    /// where it reaches nobody yet; see [`Eval::apply`].
+    probes: Vec<MoodRec>,
     extra_rooms: BTreeMap<RoomType, i32>,
     stats: Vec<StatRec<'a>>,
     moods: Vec<MoodRec>,
@@ -453,6 +466,38 @@ impl<'e, 'a> Eval<'e, 'a> {
                 return;
             };
             let recipients = self.recipients(target, o, r, s);
+            // Nobody there needs it right now. Whether it would reach a
+            // tired newcomer still makes them support (a Dormitory is full
+            // of rested operators until the first tired one arrives), so it
+            // is recorded for one stand-in recipient per room and stacked
+            // like real records: of two single-target healers, only the
+            // stronger would reach anyone.
+            if v > EPS
+                && recipients.is_empty()
+                && matches!(
+                    target,
+                    MoodTarget::OneOtherInRoom | MoodTarget::DistributedInRoom
+                )
+            {
+                let others: Vec<usize> = self.w.rooms[r]
+                    .occupants
+                    .iter()
+                    .copied()
+                    .filter(|&t| t != o)
+                    .collect();
+                if others
+                    .into_iter()
+                    .any(|t| self.holds(&c.when, o, Some(t), s))
+                {
+                    self.probes.push(MoodRec {
+                        recipient: self.w.ops.len() + r,
+                        source: o,
+                        value: v,
+                        stacking,
+                        class: MoodClass::Single,
+                    });
+                }
+            }
             let class = match target {
                 MoodTarget::SelfOnly => MoodClass::OwnerOnly,
                 MoodTarget::AllInRoom | MoodTarget::OthersInRoom => MoodClass::WholeRoom,
@@ -825,7 +870,13 @@ impl<'e, 'a> Eval<'e, 'a> {
                 _ => false,
             },
             Predicate::OperatorInRoom { who, room } => match self.find(who, s) {
-                Some(t) if self.w.room_of(t).room.kind == *room => self.picked(t),
+                Some(t) if self.w.room_of(t).room.kind == *room => {
+                    // Being there is what the skill needs of them.
+                    if t != o {
+                        self.supports[t] = true;
+                    }
+                    self.picked(t)
+                }
                 _ => false,
             },
             Predicate::OperatorInWorkArea { who } => match self.find(who, s) {
@@ -1204,30 +1255,40 @@ impl<'e, 'a> Eval<'e, 'a> {
 
         // Morale stacking: strongest per (recipient, contributor's room
         // kind, target class).
-        let mut kept_moods: Vec<MoodRec> = Vec::with_capacity(self.moods.len());
-        let mut strongest: BTreeMap<(usize, RoomType, MoodClass), usize> = BTreeMap::new();
-        for rec in std::mem::take(&mut self.moods) {
-            match rec.stacking {
-                Stacking::Additive => kept_moods.push(rec),
-                Stacking::StrongestOfType => {
-                    let key = (rec.recipient, owner_kind(rec.source), rec.class);
-                    if let Some(&i) = strongest.get(&key) {
-                        if rec.value.abs() > kept_moods[i].value.abs() {
-                            kept_moods[i] = rec;
+        let stack = |recs: Vec<MoodRec>| {
+            let mut kept: Vec<MoodRec> = Vec::with_capacity(recs.len());
+            let mut strongest: BTreeMap<(usize, RoomType, MoodClass), usize> = BTreeMap::new();
+            for rec in recs {
+                match rec.stacking {
+                    Stacking::Additive => kept.push(rec),
+                    Stacking::StrongestOfType => {
+                        let key = (rec.recipient, owner_kind(rec.source), rec.class);
+                        if let Some(&i) = strongest.get(&key) {
+                            if rec.value.abs() > kept[i].value.abs() {
+                                kept[i] = rec;
+                            }
+                        } else {
+                            strongest.insert(key, kept.len());
+                            kept.push(rec);
                         }
-                    } else {
-                        strongest.insert(key, kept_moods.len());
-                        kept_moods.push(rec);
                     }
                 }
             }
-        }
+            kept
+        };
+        let kept_moods = stack(std::mem::take(&mut self.moods));
         let mut skill_sum = vec![0.0; n];
         for rec in &kept_moods {
             skill_sum[rec.recipient] += rec.value;
             if rec.value.abs() > EPS {
                 self.counted[rec.source] = true;
             }
+            if rec.value > EPS && rec.recipient != rec.source {
+                self.supports[rec.source] = true;
+            }
+        }
+        for rec in stack(std::mem::take(&mut self.probes)) {
+            self.supports[rec.source] = true;
         }
         let mood = (0..n)
             .map(|o| {
@@ -1249,6 +1310,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                     exhausted: self.exhausted[o],
                     idle,
                     counted: self.counted[o],
+                    supports: self.supports[o],
                 }
             })
             .collect();

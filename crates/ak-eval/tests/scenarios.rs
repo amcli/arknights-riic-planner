@@ -1326,3 +1326,416 @@ fn a_report_stored_before_filler_tracking_still_reads() {
             .all(|o| o.worked_in.is_empty() && o.filler_in.is_empty())
     );
 }
+
+// ---- Dormitory shifts --------------------------------------------------------
+
+/// Operators with no skills for a Factory or a Dormitory.
+fn plain_for_shifts(n: usize, exclude: &[OperatorId]) -> Vec<OperatorId> {
+    let dorm = without_skills_for_excluding(RoomType::Dormitory, 400, exclude);
+    without_skills_for_excluding(RoomType::Manufacture, 400, exclude)
+        .into_iter()
+        .filter(|o| dorm.contains(o))
+        .take(n)
+        .collect()
+}
+
+/// Workers in two Factories (three in the first) and five rested residents
+/// filling every bed, with nobody on the bench.
+fn full_dorm(residents: &[OperatorId], workers: &[OperatorId]) -> SimRequest {
+    let b = base(vec![
+        gold_factory("f1", 3),
+        gold_factory("f2", 3),
+        Room::new("d1", RoomType::Dormitory, 5).with_ambience(5000),
+    ]);
+    let (first, second) = workers.split_at(workers.len().min(3));
+    let a = assign(&b, &[("f1", first), ("f2", second), ("d1", residents)]);
+    let mut req = request(b, a);
+    req.config.horizon_hours = 72.0;
+    req.rotation = Rotation::MoodThreshold {
+        swap_out: 4.0,
+        swap_in: 20.0,
+        bench: Vec::new(),
+    };
+    req
+}
+
+#[test]
+fn residents_take_shifts_when_every_bed_is_taken() {
+    // The five workers tire (the two in f2 about an hour before the three in
+    // f1) and trade places with the five rested residents, who are the
+    // second shift; rested again, they trade back. Nobody is benched and
+    // nobody runs out of morale.
+    let pool = plain_for_shifts(10, &[]);
+    let (workers, residents) = pool.split_at(5);
+    let r = simulate(data(), &full_dorm(residents, workers)).unwrap();
+    assert!(
+        !r.events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::Exhausted { .. } | EventKind::Benched { .. }
+        )),
+        "{:?}",
+        r.events
+    );
+    for o in &r.operators {
+        assert!(o.min_mood > 0.0, "{o:?}");
+        assert!(o.hours_working > 0.0 && o.hours_resting > 0.0, "{o:?}");
+    }
+    for room in &r.rooms[1..3] {
+        assert!(room.average_stat_pct.unwrap() > 101.9, "{room:?}");
+    }
+    // A trade is two moves at one instant, each into the other's slot.
+    let moved: Vec<(f64, &Option<Slot>, &Slot)> = r
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Moved { from, to, .. } => Some((e.hour, from, to)),
+            _ => None,
+        })
+        .collect();
+    let ((h1, from1, to1), (h2, from2, to2)) = (moved[0], moved[1]);
+    approx(h1, h2, 1e-12);
+    assert!(
+        from1
+            .as_ref()
+            .is_some_and(|s| s.room.as_str().starts_with('f'))
+    );
+    assert_eq!(to1.room.as_str(), "d1");
+    assert_eq!(from2.as_ref(), Some(to1));
+    assert_eq!(Some(to2), from1.as_ref());
+}
+
+#[test]
+fn dormitory_support_stays_put() {
+    // Indigo restores morale to another resident, so she stays even while
+    // everyone is rested; Reed only speeds his own recovery, so he takes a
+    // shift like anyone else. Four workers tire, the one in f2 first and then
+    // the three in f1: one for each resident but Indigo.
+    let indigo = by_name("Indigo");
+    let reed = by_name("Reed");
+    let pool = plain_for_shifts(7, &[indigo.clone(), reed.clone()]);
+    let (workers, rest) = pool.split_at(4);
+    // Indigo last: were she eligible, ties would pick her first.
+    let residents = [
+        reed.clone(),
+        rest[0].clone(),
+        rest[1].clone(),
+        rest[2].clone(),
+        indigo.clone(),
+    ];
+    let req = full_dorm(&residents, workers);
+
+    let snap = evaluate(data(), &req.base, &req.assignment, &maxed(), &req.config).unwrap();
+    let rate = |id: &OperatorId| {
+        snap.mood
+            .iter()
+            .find(|m| &m.operator == id)
+            .unwrap()
+            .clone()
+    };
+    assert!(rate(&indigo).supports);
+    assert!(!rate(&reed).supports && rate(&reed).counted);
+
+    let r = simulate(data(), &req).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    approx(report(&indigo).hours_working, 0.0, 1e-12);
+    assert!(report(&reed).hours_working > 0.0);
+    assert!(
+        !r.events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Exhausted { .. }))
+    );
+}
+
+/// Morale state for driving a policy by hand.
+fn at_mood(mood: f64) -> OpState {
+    OpState {
+        mood,
+        max_mood: 24.0,
+        initial_mood: mood,
+        min_mood: mood,
+        hours_in_room: 0.0,
+        hours_working: 0.0,
+        hours_resting: 0.0,
+        hours_exhausted: 0.0,
+        hours_idle: 0.0,
+        hours_benched: 0.0,
+        worked_in: Default::default(),
+        counted_in: Default::default(),
+        supported_in: Default::default(),
+    }
+}
+
+#[test]
+fn a_tired_substitute_does_not_take_over_the_slot() {
+    // A substitute who tires before the worker they cover has rested goes to
+    // rest with no claim on the slot: once rested, they stay out of the
+    // worker's way.
+    let ops = plain_for_shifts(6, &[]);
+    let (worker, residents) = (&ops[0], &ops[1..]);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5),
+    ]);
+    let mut a = assign(
+        &b,
+        &[("f1", std::slice::from_ref(worker)), ("d1", residents)],
+    );
+    let work = Slot::new("f1", 0);
+    let mut moods: Vec<(OperatorId, f64)> = vec![(worker.clone(), 4.0)];
+    moods.extend(
+        residents
+            .iter()
+            .cloned()
+            .zip([24.0, 21.0, 21.0, 21.0, 21.0]),
+    );
+    let mut policy = MoodThreshold::new(4.0, 20.0, Vec::new());
+    let mut step = |a: &mut Assignment, moods: &[(OperatorId, f64)]| {
+        let states = moods
+            .iter()
+            .map(|(id, m)| (id.clone(), at_mood(*m)))
+            .collect();
+        let view = SimView {
+            hour: 0.0,
+            data: data(),
+            base: &b,
+            assignment: a,
+            states: &states,
+        };
+        let actions = policy.next_actions(&view);
+        for action in &actions {
+            if let SimAction::Swap { a: x, b: y } = action {
+                a.swap(x, y).unwrap();
+            }
+        }
+        actions
+    };
+    let who = |a: &Assignment, slot: &Slot| {
+        a.slots(slot.room.as_str()).unwrap()[usize::from(slot.index)].clone()
+    };
+
+    // The worker trades places with the best-rested resident.
+    step(&mut a, &moods);
+    let cover = who(&a, &work).unwrap();
+    assert_eq!(cover, residents[0]);
+    // The cover tires before the worker has rested: another resident steps in.
+    for (id, m) in &mut moods {
+        *m = if id == worker {
+            10.0
+        } else if *id == cover {
+            4.0
+        } else {
+            21.0
+        };
+    }
+    step(&mut a, &moods);
+    let second = who(&a, &work).unwrap();
+    assert!(second != cover && second != *worker);
+    // The worker, rested, goes home.
+    for (id, m) in &mut moods {
+        *m = if id == worker {
+            20.0
+        } else if *id == cover {
+            10.0
+        } else {
+            15.0
+        };
+    }
+    step(&mut a, &moods);
+    assert_eq!(who(&a, &work).as_ref(), Some(worker));
+    // The first cover, rested too, leaves the worker be.
+    for (id, m) in &mut moods {
+        *m = if id == worker {
+            18.0
+        } else if *id == cover {
+            24.0
+        } else {
+            15.0
+        };
+    }
+    assert!(step(&mut a, &moods).is_empty());
+    assert_eq!(who(&a, &work).as_ref(), Some(worker));
+}
+
+#[test]
+fn residents_cover_while_beds_are_free() {
+    // With beds to spare, a tired worker takes a free one and a rested
+    // resident takes the slot: the residents are the second shift whether or
+    // not the Dormitory is full.
+    let pool = plain_for_shifts(6, &[]);
+    let (workers, residents) = pool.split_at(3);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5).with_ambience(5000),
+    ]);
+    let a = assign(&b, &[("f1", workers), ("d1", residents)]);
+    let mut req = request(b, a);
+    req.config.horizon_hours = 72.0;
+    req.rotation = Rotation::MoodThreshold {
+        swap_out: 4.0,
+        swap_in: 20.0,
+        bench: Vec::new(),
+    };
+    let r = simulate(data(), &req).unwrap();
+    assert!(
+        !r.events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::Exhausted { .. } | EventKind::Benched { .. }
+        )),
+        "{:?}",
+        r.events
+    );
+    for o in &r.operators {
+        assert!(o.hours_working > 0.0 && o.hours_resting > 0.0, "{o:?}");
+    }
+    assert!(r.rooms[1].average_stat_pct.unwrap() > 102.9);
+}
+
+#[test]
+fn the_weaker_of_two_healers_takes_shifts() {
+    // Shining and Myrrh each restore morale to one other resident, but only
+    // the stronger effect of the type applies: Myrrh would never reach
+    // anyone, so she is the second shift. She sits first, where the stand-in
+    // newcomer must not make her look like support.
+    let (shining, myrrh) = (by_name("Shining"), by_name("Myrrh"));
+    let pool = plain_for_shifts(7, &[shining.clone(), myrrh.clone()]);
+    let (workers, rest) = pool.split_at(4);
+    let residents = [
+        myrrh.clone(),
+        shining.clone(),
+        rest[0].clone(),
+        rest[1].clone(),
+        rest[2].clone(),
+    ];
+    let req = full_dorm(&residents, workers);
+    let snap = evaluate(data(), &req.base, &req.assignment, &maxed(), &req.config).unwrap();
+    let rate = |id: &OperatorId| {
+        snap.mood
+            .iter()
+            .find(|m| &m.operator == id)
+            .unwrap()
+            .clone()
+    };
+    assert!(rate(&shining).supports && !rate(&myrrh).supports);
+
+    let r = simulate(data(), &req).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    approx(report(&shining).hours_working, 0.0, 1e-12);
+    assert!(report(&myrrh).hours_working > 0.0);
+}
+
+#[test]
+fn a_resident_another_skill_needs_stays() {
+    // Sankta Miksaparato's clue bonus needs Fiammetta in a Dormitory, so
+    // Fiammetta stays put, though she raises nobody's morale.
+    let fiammetta = by_name("Fiammetta");
+    let mixer = by_name("Sankta Miksaparato");
+    let pool = plain_for_shifts(8, &[fiammetta.clone(), mixer.clone()]);
+    let (workers, rest) = pool.split_at(4);
+    let residents = [
+        rest[0].clone(),
+        rest[1].clone(),
+        rest[2].clone(),
+        rest[3].clone(),
+        fiammetta.clone(),
+    ];
+    let mut req = full_dorm(&residents, workers);
+    req.base.rooms.push(Room::new("r1", RoomType::Meeting, 3));
+    req.assignment = assign(
+        &req.base,
+        &[
+            ("f1", &workers[..3]),
+            ("f2", &workers[3..]),
+            ("d1", &residents),
+            ("r1", std::slice::from_ref(&mixer)),
+        ],
+    );
+    let snap = evaluate(data(), &req.base, &req.assignment, &maxed(), &req.config).unwrap();
+    let rate = snap.mood.iter().find(|m| m.operator == fiammetta).unwrap();
+    assert!(rate.supports);
+    let r = simulate(data(), &req).unwrap();
+    let report = r.operators.iter().find(|o| o.id == fiammetta).unwrap();
+    approx(report.hours_working, 0.0, 1e-12);
+}
+
+#[test]
+fn the_policy_passes_over_dormitory_support() {
+    // Even as the best-rested resident, support is not a substitute.
+    let ops = plain_for_shifts(3, &[]);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5),
+    ]);
+    let a = assign(&b, &[("f1", &ops[..1]), ("d1", &ops[1..])]);
+    let mut support = at_mood(24.0);
+    support.supported_in.insert(RoomId::new("d1"));
+    let states = [
+        (ops[0].clone(), at_mood(4.0)),
+        (ops[1].clone(), support),
+        (ops[2].clone(), at_mood(21.0)),
+    ]
+    .into_iter()
+    .collect();
+    let view = SimView {
+        hour: 0.0,
+        data: data(),
+        base: &b,
+        assignment: &a,
+        states: &states,
+    };
+    let actions = MoodThreshold::new(4.0, 20.0, Vec::new()).next_actions(&view);
+    let work = Slot::new("f1", 0);
+    let moved = |who: &OperatorId| {
+        actions.iter().any(
+            |act| matches!(act, SimAction::Move { operator, to } if operator == who && *to == work),
+        )
+    };
+    assert!(moved(&ops[2]), "{actions:?}");
+    assert!(!moved(&ops[1]), "{actions:?}");
+}
+
+#[test]
+fn a_swap_restarts_both_operators_time_in_room() {
+    // Ramping skills count hours since entering the room, so a trade starts
+    // the clock again for both.
+    struct SwapOnce {
+        done: bool,
+        after: Option<Vec<f64>>,
+    }
+    impl RotationPolicy for SwapOnce {
+        fn next_actions(&mut self, v: &SimView<'_>) -> Vec<SimAction> {
+            let (a, b) = (Slot::new("f1", 0), Slot::new("d1", 0));
+            if !self.done && v.hour >= 6.0 {
+                self.done = true;
+                return vec![SimAction::Swap { a, b }];
+            }
+            if self.done && self.after.is_none() {
+                let at = |s: &Slot| {
+                    v.assignment.slots(s.room.as_str()).unwrap()[usize::from(s.index)]
+                        .clone()
+                        .unwrap()
+                };
+                self.after = Some(
+                    [a, b]
+                        .iter()
+                        .map(|s| v.states[&at(s)].hours_in_room)
+                        .collect(),
+                );
+            }
+            Vec::new()
+        }
+    }
+    let pool = plain_for_shifts(2, &[]);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5),
+    ]);
+    let a = assign(&b, &[("f1", &pool[..1]), ("d1", &pool[1..])]);
+    let mut policy = SwapOnce {
+        done: false,
+        after: None,
+    };
+    simulate_with(data(), &b, &a, &maxed(), &SimConfig::default(), &mut policy).unwrap();
+    for hours in policy.after.unwrap() {
+        assert!(hours < 0.5, "{hours}");
+    }
+}

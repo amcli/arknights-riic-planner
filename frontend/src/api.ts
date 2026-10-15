@@ -282,6 +282,11 @@ export interface MoodRate {
    * are, or they work in the Reception Room.
    */
   counted: boolean;
+  /**
+   * Their being here does something for another operator: a skill of theirs raises, or would raise, another's morale
+   * (Dormitory support), or another operator's skill needs them in this room.
+   */
+  supports: boolean;
 }
 
 export interface Contribution {
