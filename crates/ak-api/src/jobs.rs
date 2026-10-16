@@ -12,7 +12,9 @@
 //! ```
 //!
 //! At most [`Limits::max_running_solves`](crate::Limits::max_running_solves)
-//! run at once; the rest wait as `pending`. Stopping a running solve ends
+//! run at once; the rest wait as `pending`. One account may have at most
+//! [`Limits::max_solves_per_account`](crate::Limits::max_solves_per_account)
+//! queued or running ([`Jobs::admit`]). Stopping a running solve ends
 //! its search early and keeps what it found. Deleting a solve stops it and
 //! removes the document; nothing is written back afterwards.
 //!
@@ -24,7 +26,8 @@
 //! see [`Jobs::drain`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -148,6 +151,25 @@ struct Live {
     state: tokio::sync::Mutex<LiveState>,
     stop: AtomicBool,
     progress: Mutex<Option<Progress>>,
+    /// Wakes the job's runner if it is stopped or deleted while it waits for
+    /// a slot, so it lets go of its request at once.
+    cancelled: tokio::sync::Notify,
+}
+
+impl Live {
+    /// A job of `owner`'s, waiting for a slot.
+    fn queued(owner: Uuid) -> Self {
+        Live {
+            owner,
+            state: tokio::sync::Mutex::new(LiveState {
+                stage: Stage::Queued,
+                deleted: false,
+            }),
+            stop: AtomicBool::new(false),
+            progress: Mutex::new(None),
+            cancelled: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -181,6 +203,8 @@ pub struct Jobs {
     permits: Arc<Semaphore>,
     max_running: usize,
     shutting_down: AtomicBool,
+    /// Runners waiting for a slot.
+    waiting: AtomicUsize,
 }
 
 impl Jobs {
@@ -193,6 +217,7 @@ impl Jobs {
             permits: Arc::new(Semaphore::new(max_running)),
             max_running,
             shutting_down: AtomicBool::new(false),
+            waiting: AtomicUsize::new(0),
         }
     }
 
@@ -234,6 +259,7 @@ impl Jobs {
                     .await?;
                 }
                 st.stage = Stage::Cancelled;
+                live.cancelled.notify_one();
                 drop(st);
                 self.forget(id);
                 Ok(Stopped::Cancelled)
@@ -247,7 +273,10 @@ impl Jobs {
     }
 
     /// Deletes one of `owner`'s job documents, stopping the job first if it
-    /// is queued or running. Returns whether there was a document. Run it
+    /// is queued or running. A running job keeps its place among the
+    /// account's queued and running solves until its search has wound down,
+    /// since it holds a slot until then. Returns whether there was a
+    /// document. Run it
     /// with [`to_completion`](crate::stored::to_completion), so a dropped
     /// request cannot leave it half done.
     pub async fn delete(&self, store: &Store, owner: Uuid, id: Uuid) -> Result<bool, StoreError> {
@@ -257,12 +286,16 @@ impl Jobs {
         let mut st = live.state.lock().await;
         let removed = store.delete(owner, Collection::Solves, id).await?;
         st.deleted = true;
-        if st.stage == Stage::Queued {
-            st.stage = Stage::Cancelled;
-        }
         live.stop.store(true, Ordering::SeqCst);
+        let queued = st.stage == Stage::Queued;
+        if queued {
+            st.stage = Stage::Cancelled;
+            live.cancelled.notify_one();
+        }
         drop(st);
-        self.forget(id);
+        if queued {
+            self.forget(id);
+        }
         Ok(removed)
     }
 
@@ -302,10 +335,34 @@ impl Jobs {
         lock(&self.live).len()
     }
 
+    /// Takes a place in the queue for `owner`'s new solve `id`, unless they
+    /// already have `max` queued or running. Checking and taking happen
+    /// under one lock, so two solves sent at once cannot both take the last
+    /// place. Follow with [`start`] once the solve is stored, or with
+    /// [`withdraw`](Self::withdraw) if it could not be.
+    pub fn admit(&self, owner: Uuid, id: Uuid, max: NonZeroUsize) -> bool {
+        let mut live = lock(&self.live);
+        if live.values().filter(|job| job.owner == owner).count() >= max.get() {
+            return false;
+        }
+        live.insert(id, Arc::new(Live::queued(owner)));
+        true
+    }
+
+    /// Gives back the place [`admit`](Self::admit) took for `id`.
+    pub fn withdraw(&self, id: Uuid) {
+        self.forget(id);
+    }
+
     /// Solves holding a slot right now, including a deleted one whose
     /// search has not wound down yet.
     pub fn running(&self) -> usize {
         self.max_running - self.permits.available_permits()
+    }
+
+    /// Runners waiting for a slot.
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
     }
 }
 
@@ -367,21 +424,30 @@ impl Observer for LiveObserver<'_> {
     }
 }
 
-/// Queues one of `owner`'s stored jobs; it runs when a slot is free.
-pub fn enqueue(state: &AppState, owner: Uuid, id: Uuid, job: SolveJob) {
-    let live = Arc::new(Live {
-        owner,
-        state: tokio::sync::Mutex::new(LiveState {
-            stage: Stage::Queued,
-            deleted: false,
-        }),
-        stop: AtomicBool::new(false),
-        progress: Mutex::new(None),
-    });
-    lock(&state.jobs.live).insert(id, live.clone());
+/// Queues one of `owner`'s stored jobs, however many they already have (a
+/// solve left over from before a restart was admitted then); it runs when a
+/// slot is free.
+fn enqueue(state: &AppState, owner: Uuid, id: Uuid, job: SolveJob) {
+    lock(&state.jobs.live).insert(id, Arc::new(Live::queued(owner)));
+    start(state, id, job);
+}
+
+/// Runs a queued job ([`Jobs::admit`], or one picked up by [`resume`]) when
+/// a slot is free.
+pub fn start(state: &AppState, id: Uuid, job: SolveJob) {
+    let Some(live) = state.jobs.get(id) else {
+        return;
+    };
     let state = state.clone();
     tokio::spawn(async move {
-        let Ok(permit) = state.jobs.permits.clone().acquire_owned().await else {
+        state.jobs.waiting.fetch_add(1, Ordering::SeqCst);
+        let permit = tokio::select! {
+            permit = state.jobs.permits.clone().acquire_owned() => permit.ok(),
+            // Stopped or deleted while waiting: it is already forgotten.
+            () = live.cancelled.notified() => None,
+        };
+        state.jobs.waiting.fetch_sub(1, Ordering::SeqCst);
+        let Some(permit) = permit else {
             return;
         };
         {

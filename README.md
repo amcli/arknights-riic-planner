@@ -14,7 +14,7 @@ design; this README tracks what actually exists.
 | 4. Evaluator / mood sim | `ak-eval` | **Done for production and morale.** Instantaneous evaluator plus a deterministic fixed-tick simulator with rotation, collection and a shared depot. Clue output and resource accumulators are not simulated yet. |
 | 5. Solver | `ak-solver` | **Done.** Exhaustive search for small spaces, simulated annealing otherwise; a fast steady-state proxy inside the loop, the full simulator on the finalists; top-K with distinct scores; deterministic; progress reports and early stop through an `Observer`. |
 | 6. Persistence | `ak-store` | **Done.** Versioned JSON documents for rosters, bases and solve jobs in Postgres, each owned by an account, migrated on read; pooled connections; schema migrations applied by `ak-api migrate`, so the server runs as a role that cannot change the schema. |
-| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. Accounts with password sign-in and cookie sessions; everything but the game data, `/healthz` and signing up, in and out needs one, and each sees only its own documents. JSON errors throughout, work limits, gzip, opt-in CORS. |
+| 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. Accounts with password sign-in and cookie sessions; everything but the game data, `/healthz` and signing up, in and out needs one, and each sees only its own documents. JSON errors throughout, per-client rate limits, sign-in backoff, per-account quotas, body and work limits, gzip, opt-in CORS. |
 | 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (public profile, current, row and legacy shapes; the API fetches a profile by username) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
 | 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines; sign-in and account creation. |
 
@@ -349,7 +349,38 @@ before the server exits.
 **Limits.** `--max-ticks` (50 000 by default) bounds horizon ÷ tick for
 simulate and solve requests, and `--max-solve-ms` (ten minutes) becomes the
 time budget of any solve without a shorter one; the stored request shows
-the budget that applied.
+the budget that applied. Beyond that:
+
+- *Per client.* Every client has a budget of requests that refills at a
+  steady rate: 120 at once, then 20 a second (`--request-burst`,
+  `--requests-per-minute`), across all routes. Signing up and signing in
+  also draw on a much smaller one: 10 at once, then 5 a minute
+  (`--sign-in-burst`, `--sign-ins-per-minute`). Over budget is `429`
+  with `Retry-After`, before any other work. IPv6 clients are counted by
+  their /64, the smallest block a network is given, so hopping between
+  the addresses of one network buys nothing; a client holding a larger
+  block gets one budget per /64, as one holding many IPv4 addresses gets
+  one per address.
+- *Who the client is.* The address the request connects from, unless that
+  is a reverse proxy listed with `--trusted-proxy` (an address or a block
+  such as `10.0.0.0/8`; none by default). Then the client is the
+  rightmost `X-Forwarded-For` entry that is not itself a trusted proxy,
+  the first address no client could have written; anything a client puts
+  in the header is otherwise ignored. Behind a reverse proxy, list it:
+  otherwise every client is the proxy, and all of them share one budget,
+  the sign-in one included. The proxy must append to `X-Forwarded-For`
+  (nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`);
+  `X-Real-IP` alone is not read.
+- *Per account.* At most 2 solves queued or running
+  (`--max-solves-per-account`) and 2 simulations computing
+  (`--max-simulations-per-account`: evaluate, simulate and a finalist's
+  simulation) at once; over that is `429`. A simulation keeps its slot
+  until it is done, even if its client has gone. A solve stopped or
+  deleted while it waits gives its place back at once; a running one that
+  is deleted keeps it until its search has wound down. Solves picked up
+  after a restart were admitted before it and are not held back.
+- *Bodies.* At most 1 MiB, and 16 KiB for signing up and in (`413`
+  above that).
 
 **Accounts.** `POST /api/v1/auth/register` creates an account from a
 username (3 to 32 letters, digits, `_` or `-`, unique regardless of case),
@@ -366,6 +397,18 @@ with the account signed in.
   password over 4 KiB is refused before any of that work. A wrong
   password and an unknown username get the same `401` after the same
   work, so neither can be told apart.
+- *Repeated failures.* Five wrong passwords in a row for one username are
+  free; each after that makes the next attempt wait, 1 second at first and
+  twice as long each time, up to a minute. An attempt during the wait is
+  `429` with `Retry-After`, without its password being checked. No wait
+  is longer than a minute, and the right password at the first attempt
+  after one signs in and clears the count, as do 15 minutes without a
+  failure; but the wait belongs to the username, so someone who keeps
+  failing for it keeps it waiting. An attempt counts as a failure from the
+  moment it is let through until its password proves right, so attempts
+  sent all at once get no more than attempts sent one by one. Counts are
+  kept by username whether or not an account has it, in memory, in a fixed
+  table indexed by a secret hash (a restart forgets them).
 - *The email* is checked only for shape and is not unique: it is not
   verified, so nobody can claim someone else's address first or learn
   which addresses have accounts. It is shown only to its owner.
@@ -404,11 +447,12 @@ it. These answers, like the account ones, are sent
 bodies, unknown routes (`404`) and wrong methods (`405`, with `Allow`).
 Anything wrong in a body is `400`, and shape errors name the path
 (`base.rooms[0].kind: unknown variant …`), and a malformed document id is
-`400` too. A missing `Content-Type` is `415`. A request that is not
-signed in, or a failed sign-in, is `401`; one refused for coming from
-another site is `403`. Database failures are logged in full and answered
-without detail: `503` when the database is unreachable or busy, `500`
-otherwise.
+`400` too. A missing `Content-Type` is `415` and an oversized body `413`.
+A request that is not signed in, or a failed sign-in, is `401`; one
+refused for coming from another site is `403`; one over a limit is `429`,
+with `Retry-After` when the wait is known. Database failures are logged in
+full and answered without detail: `503` when the database is unreachable
+or busy, `500` otherwise.
 
 **Transport.** Responses are gzip-compressed when the client accepts it (a
 24-hour simulation shrinks from 41 KB to 4 KB). CORS is off unless
@@ -553,7 +597,7 @@ crates/
   ak-store/             Layer 6: versioned JSON documents in Postgres
     migrations/         the schema, applied in order by `ak-api migrate`
   ak-api/               Layer 7: axum routes, references, job queue, limits
-    src/auth/           accounts: password hashing, session cookies, cross-site guard
+    src/auth/           accounts: password hashing, session cookies, cross-site guard, sign-in backoff
     tests/api.rs        the router driven in-process
   ak-cli/               `ak stats | op | skill | find | skipped | mechanics | simulate | solve | import`
 examples/requests/      simulation and solve requests for a 2-4-3 base
@@ -655,7 +699,7 @@ API endpoints. All but the game data, `/healthz` and signing up, in or out need 
 
 - `GET /healthz`
 - `POST /api/v1/auth/register` — body `{ username, password, email? }`, answers `201` with the account and a session cookie, `409` if the username is taken
-- `POST /api/v1/auth/login` — body `{ username, password }`, answers the account and a session cookie
+- `POST /api/v1/auth/login` — body `{ username, password }`, answers the account and a session cookie, `429` while the username must wait after failed attempts
 - `POST /api/v1/auth/logout` — ends the session, `204`
 - `GET /api/v1/auth/me` — the account signed in, or `401`
 - `GET /api/v1/gamedata/version` — source, SHA, fetch time, parser version, counts, coverage
@@ -672,11 +716,14 @@ API endpoints. All but the game data, `/healthz` and signing up, in or out need 
 - `POST /api/v1/rosters/preview` — same body; the roster and import report, not stored
 - `GET /api/v1/import/krooster/{username}` — the roster in a Krooster user's public profile, `{ data: { roster } }`, to store with source `krooster`
 - `POST /api/v1/bases`, `GET /api/v1/bases`, `GET|PUT|DELETE /api/v1/bases/{id}` — body `{ name?, base }`, validated
-- `POST /api/v1/solves` — body `{ name?, request }`, answers `202` with the job; `GET /api/v1/solves` lists jobs with status
+- `POST /api/v1/solves` — body `{ name?, request }`, answers `202` with the job, `429` if the account already has as many queued or running as it may; `GET /api/v1/solves` lists jobs with status
 - `GET /api/v1/solves/{id}` — status, the request as it ran, `progress` while running, the result or error once finished
 - `POST /api/v1/solves/{id}/stop` — cancel if pending, end the search early if running
 - `DELETE /api/v1/solves/{id}` — stop if needed, then remove
 - `GET /api/v1/solves/{id}/candidates/{n}/simulation` — finalist `n` (0 is the best) simulated the way the solve scored it
+
+Evaluate, simulate and a finalist's simulation answer `429` while the
+account already has as many simulations computing as it may.
 
 Evaluate, simulate and solve requests may use `base_id` / `roster_id` in
 place of `base` / `roster`. Invalid requests get `400` with a readable

@@ -3,14 +3,17 @@
 //! Every error the API returns has a JSON body `{ "error": message }`,
 //! including malformed bodies, unknown routes and wrong methods. Anything
 //! the client got wrong in a body is `400`; a missing `Content-Type` is
-//! `415` and an oversized body `413`, as axum decides. Database failures
+//! `415` and an oversized body `413`, as axum decides. Going over a limit
+//! is `429`, with `Retry-After` when the wait is known. Database failures
 //! are logged in full but answered without detail: `503` when the database
 //! is unreachable or busy, `500` otherwise.
+
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Request};
-use axum::http::{Method, StatusCode, Uri};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 
@@ -23,6 +26,8 @@ pub struct ApiError {
     pub status: StatusCode,
     /// What went wrong, for a person.
     pub message: String,
+    /// How long until trying again could succeed, sent as `Retry-After`.
+    pub retry_after: Option<Duration>,
 }
 
 impl ApiError {
@@ -31,6 +36,15 @@ impl ApiError {
         ApiError {
             status,
             message: message.to_string(),
+            retry_after: None,
+        }
+    }
+
+    /// The same error, telling the client to try again after `wait`.
+    pub fn retry_after(self, wait: Duration) -> Self {
+        ApiError {
+            retry_after: Some(wait),
+            ..self
         }
     }
 
@@ -59,6 +73,11 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, message)
     }
 
+    /// `429`: over a limit; try again later.
+    pub fn too_many_requests(message: impl ToString) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, message)
+    }
+
     /// `500`: our fault.
     pub fn internal(message: impl ToString) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
@@ -85,12 +104,24 @@ impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status,
             Json(serde_json::json!({ "error": self.message })),
         )
-            .into_response()
+            .into_response();
+        if let Some(wait) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(whole_seconds(wait)));
+        }
+        response
     }
+}
+
+/// `wait` in whole seconds, rounded up and at least one: a client told to
+/// wait 0 seconds would come straight back.
+pub fn whole_seconds(wait: Duration) -> u64 {
+    (wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1)
 }
 
 impl From<StoreError> for ApiError {

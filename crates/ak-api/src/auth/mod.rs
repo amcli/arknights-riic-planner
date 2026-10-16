@@ -10,11 +10,15 @@
 //! A username is 3 to 32 letters, digits, `_` or `-`, unique regardless of
 //! case. The email is optional and only checked for shape. Passwords are
 //! described in [`password`], sessions in [`session`]. A wrong username and
-//! a wrong password get the same `401`, after the same amount of work.
-//! Handlers that need the account take a [`CurrentUser`].
+//! a wrong password get the same `401`, after the same amount of work, and
+//! repeated failures for one username make its next attempt wait
+//! ([`backoff`]). Handlers that need the account take a [`CurrentUser`].
 
+pub mod backoff;
 pub mod password;
 pub mod session;
+
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{FromRequestParts, State};
@@ -158,19 +162,32 @@ pub async fn register(
         .into_response())
 }
 
-/// `POST /api/v1/auth/login`: signs in.
+/// `POST /api/v1/auth/login`: signs in, unless the username must wait
+/// after failed attempts (`429`).
 pub async fn login(
     State(s): State<AppState>,
     headers: HeaderMap,
     Body(body): Body<SignIn>,
 ) -> Result<Response, ApiError> {
+    // Only a name that could be an account's is counted, and the attempt
+    // counts as a failure unless the password turns out right.
+    let username = check_username(&body.username).ok();
+    if let Some(name) = username
+        && let Err(wait) = s.logins.attempt(name, Instant::now())
+    {
+        return Err(ApiError::too_many_requests(format!(
+            "too many failed sign-ins as {name:?}; try again in {} s",
+            crate::error::whole_seconds(wait)
+        ))
+        .retry_after(wait));
+    }
     let wrong = || ApiError::unauthorized("wrong username or password");
     let Some(password) = password::normalize(&body.password) else {
         return Err(wrong());
     };
-    let found = match check_username(&body.username) {
-        Ok(username) => s.store.credentials(username).await?,
-        Err(_) => None,
+    let found = match username {
+        Some(name) => s.store.credentials(name).await?,
+        None => None,
     };
     let Some((user, stored)) = found else {
         s.passwords.verify_nobody(password).await?;
@@ -179,6 +196,7 @@ pub async fn login(
     let Verdict::Right { rehash } = s.passwords.verify(password, stored).await? else {
         return Err(wrong());
     };
+    s.logins.succeeded(&user.username);
     if let Some(hash) = rehash {
         // An upgrade that fails is tried again at the next sign-in.
         if let Err(e) = s.store.set_password_hash(user.id, &hash).await {

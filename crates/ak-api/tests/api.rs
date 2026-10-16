@@ -3,12 +3,14 @@
 //! `DATABASE_URL`), migrates, and drops after a pass.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -16,11 +18,13 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use ak_api::auth::backoff::{FIRST_WAIT, FREE_FAILURES};
 use ak_api::auth::session::Token;
 use ak_api::jobs::{JobStatus, SolveJob};
 use ak_api::krooster::Krooster;
 use ak_api::refs::Refs;
-use ak_api::{AppState, Limits};
+use ak_api::throttle::Rate;
+use ak_api::{AppState, Limits, MAX_BODY, MAX_SIGN_IN_BODY};
 use ak_data::{Strictness, load_default};
 use ak_domain::{BaseConfig, GameData, Roster};
 use ak_eval::SimRequest;
@@ -129,20 +133,25 @@ impl Harness {
         body: Option<&str>,
         headers: &[(&str, &str)],
     ) -> Response<Body> {
-        self.raw_as(self.cookie.as_deref(), method, uri, body, headers)
+        self.raw_as(self.cookie.as_deref(), None, method, uri, body, headers)
             .await
     }
 
-    /// A request carrying `cookie`, unless `headers` carry one of their own.
+    /// A request carrying `cookie`, unless `headers` carry one of their own,
+    /// and coming from `peer` as if through a socket, if given.
     async fn raw_as(
         &self,
         cookie: Option<&str>,
+        peer: Option<SocketAddr>,
         method: Method,
         uri: &str,
         body: Option<&str>,
         headers: &[(&str, &str)],
     ) -> Response<Body> {
         let mut req = Request::builder().method(method).uri(uri);
+        if let Some(addr) = peer {
+            req = req.extension(ConnectInfo(addr));
+        }
         for (name, value) in headers {
             req = req.header(*name, *value);
         }
@@ -819,7 +828,16 @@ async fn stored_job(
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn unfinished_solves_resume_after_a_restart(pool: PgPool) {
-    let h = Harness::signed_in(pool, Limits::default()).await;
+    // Solves picked up after a restart were admitted before it, so the
+    // account's allowance does not hold them back: two resume here.
+    let h = Harness::signed_in(
+        pool,
+        Limits {
+            max_solves_per_account: NonZeroUsize::MIN,
+            ..Limits::default()
+        },
+    )
+    .await;
     let (store, owner, quick) = (&h.state.store, h.user_id().await, quick_solve());
     let interrupted = stored_job(store, owner, &quick, JobStatus::Running, 1).await;
     let waiting = stored_job(store, owner, &quick, JobStatus::Pending, 0).await;
@@ -946,6 +964,7 @@ impl Harness {
         let resp = self
             .raw_as(
                 None,
+                None,
                 Method::POST,
                 "/api/v1/auth/register",
                 Some(&body),
@@ -1013,8 +1032,9 @@ async fn accounts_register_sign_in_and_out(pool: PgPool) {
     assert!(error_of(&err).contains("taken"), "{err}");
 
     // A wrong password, an unknown user and an impossible username all get
-    // the same answer.
-    let huge = "x".repeat(1 << 20);
+    // the same answer, as does a password too long to be one (but not too
+    // long to send).
+    let huge = "x".repeat(8 * 1024);
     for (username, password) in [
         ("Doctor", "wrong horse"),
         ("nobody", PASSWORD),
@@ -1082,7 +1102,7 @@ async fn registration_checks_its_fields(pool: PgPool) {
             "8 to 128",
         ),
         (
-            json!({ "username": "kaltsit", "password": "x".repeat(1 << 20) }),
+            json!({ "username": "kaltsit", "password": "x".repeat(8 * 1024) }),
             "8 to 128",
         ),
         (
@@ -1750,4 +1770,450 @@ async fn every_finalist_can_be_simulated(pool: PgPool) {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(error_of(&err).contains("finalists"), "{err}");
+}
+
+// ---- limits ----------------------------------------------------------------
+
+/// A budget of `burst` requests refilling at one a minute: in a test, a
+/// fixed number of requests.
+fn budget(burst: u32) -> Rate {
+    Rate {
+        per_minute: NonZeroU32::new(1).unwrap(),
+        burst: NonZeroU32::new(burst).unwrap(),
+    }
+}
+
+impl Harness {
+    /// A request from `peer`, as if it had come in through a socket, with
+    /// the harness's session cookie.
+    async fn send_from(
+        &self,
+        peer: &str,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
+        let text = body.map(|b| b.to_string());
+        let peer = Some(peer.parse().unwrap());
+        let resp = self
+            .raw_as(
+                self.cookie.as_deref(),
+                peer,
+                method,
+                uri,
+                text.as_deref(),
+                headers,
+            )
+            .await;
+        let headers = resp.headers().clone();
+        let (status, body) = read(resp).await;
+        (status, headers, body)
+    }
+}
+
+/// Asserts a `429` with a JSON error and a `Retry-After` of at least a
+/// second, and returns the error.
+fn too_many(status: StatusCode, headers: &HeaderMap, body: &Value) -> String {
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let retry: u64 = headers[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(retry >= 1, "{retry}");
+    error_of(body).to_owned()
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn clients_are_limited_by_address(pool: PgPool) {
+    let h = Harness::new(
+        pool,
+        Limits {
+            requests: budget(3),
+            ..Limits::default()
+        },
+    );
+    let get = |peer: &'static str| {
+        let h = &h;
+        async move {
+            h.send_from(peer, Method::GET, "/api/v1/gamedata/version", None, &[])
+                .await
+        }
+    };
+    for _ in 0..3 {
+        assert_eq!(get("198.51.100.1:4000").await.0, StatusCode::OK);
+    }
+    let (status, headers, body) = get("198.51.100.1:4001").await;
+    let message = too_many(status, &headers, &body);
+    assert!(message.contains("too many requests"), "{message}");
+    // Every route draws on the same budget, unknown ones included.
+    let (status, _, _) = h
+        .send_from("198.51.100.1:4002", Method::GET, "/nowhere", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // Another address has its own budget; a request with no address (made
+    // in-process) is not counted.
+    assert_eq!(get("198.51.100.2:4000").await.0, StatusCode::OK);
+    for _ in 0..5 {
+        assert_eq!(h.get("/api/v1/gamedata/version").await.0, StatusCode::OK);
+    }
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn x_forwarded_for_counts_only_from_a_trusted_proxy(pool: PgPool) {
+    let limits = |trusted: &[&str]| Limits {
+        requests: budget(1),
+        trusted_proxies: trusted
+            .iter()
+            .map(|t| ak_api::client::parse_trusted(t).unwrap())
+            .collect(),
+        ..Limits::default()
+    };
+    let version = "/api/v1/gamedata/version";
+    let via = |client: &'static str| [("x-forwarded-for", client)];
+
+    // Behind a trusted proxy, each client named by the proxy is counted
+    // apart, whatever it claims in front of that.
+    let h = Harness::new(pool.clone(), limits(&["127.0.0.1"]));
+    for (client, expected) in [
+        ("203.0.113.1", StatusCode::OK),
+        ("203.0.113.2", StatusCode::OK),
+        ("203.0.113.1", StatusCode::TOO_MANY_REQUESTS),
+        ("192.0.2.50, 203.0.113.1", StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        let (status, _, body) = h
+            .send_from("127.0.0.1:9000", Method::GET, version, None, &via(client))
+            .await;
+        assert_eq!(status, expected, "{client}: {body}");
+    }
+
+    // Without one, the header is ignored: the address connecting is the
+    // client.
+    let h = Harness::new(pool, limits(&[]));
+    let (status, _, _) = h
+        .send_from(
+            "127.0.0.1:9000",
+            Method::GET,
+            version,
+            None,
+            &via("203.0.113.1"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = h
+        .send_from(
+            "127.0.0.1:9000",
+            Method::GET,
+            version,
+            None,
+            &via("203.0.113.2"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn signing_up_and_in_have_a_smaller_budget(pool: PgPool) {
+    let h = Harness::new(
+        pool,
+        Limits {
+            sign_ins: budget(2),
+            ..Limits::default()
+        },
+    );
+    let peer = "198.51.100.7:5000";
+    let sign_up = json!({ "username": "doctor", "password": PASSWORD });
+    let (status, _, body) = h
+        .send_from(
+            peer,
+            Method::POST,
+            "/api/v1/auth/register",
+            Some(sign_up),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let wrong = json!({ "username": "doctor", "password": "wrong horse" });
+    let (status, _, _) = h
+        .send_from(
+            peer,
+            Method::POST,
+            "/api/v1/auth/login",
+            Some(wrong.clone()),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, headers, body) = h
+        .send_from(peer, Method::POST, "/api/v1/auth/login", Some(wrong), &[])
+        .await;
+    let message = too_many(status, &headers, &body);
+    assert!(message.contains("sign-ups and sign-ins"), "{message}");
+    // The rest of the API, signing out and asking who is signed in included,
+    // is not counted against it.
+    for uri in ["/api/v1/gamedata/version", "/api/v1/auth/me"] {
+        let (status, _, _) = h.send_from(peer, Method::GET, uri, None, &[]).await;
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "{uri}");
+    }
+    let (status, _, _) = h
+        .send_from(peer, Method::POST, "/api/v1/auth/logout", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn failed_sign_ins_make_the_next_attempt_wait(pool: PgPool) {
+    let h = Harness::new(pool, Limits::default());
+    h.register("doctor").await;
+    let attempt = |username: &str, password: &str| {
+        let body = json!({ "username": username, "password": password });
+        let h = &h;
+        async move {
+            h.send(Method::POST, "/api/v1/auth/login", Some(body), &[])
+                .await
+        }
+    };
+    // An account, and a username no account has, are treated alike.
+    for username in ["Doctor", "nobody"] {
+        for _ in 0..=FREE_FAILURES {
+            let (status, _, body) = attempt(username, "wrong horse").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{username}: {body}");
+        }
+        // Now even the right password must wait.
+        let (status, headers, body) = attempt(&username.to_uppercase(), PASSWORD).await;
+        let message = too_many(status, &headers, &body);
+        assert!(message.contains("failed sign-ins"), "{message}");
+    }
+    // Another username is not held up.
+    let (status, _, _) = attempt("amiya", "wrong horse").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // After the wait, the right password signs in and clears the count:
+    // the whole allowance is back.
+    tokio::time::sleep(FIRST_WAIT + Duration::from_millis(100)).await;
+    let (status, _, body) = attempt("doctor", PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for _ in 0..=FREE_FAILURES {
+        let (status, _, body) = attempt("doctor", "wrong horse").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn an_account_may_have_only_so_many_solves(pool: PgPool) {
+    let h = Harness::signed_in(
+        pool,
+        Limits {
+            max_solves_per_account: NonZeroUsize::MIN,
+            max_running_solves: 1,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let first = h
+        .create("solves", json!({ "request": endless_solve() }))
+        .await;
+    let (status, err) = h
+        .post("/api/v1/solves", json!({ "request": quick_solve() }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{err}");
+    assert!(
+        error_of(&err).contains("1 solves queued or running"),
+        "{err}"
+    );
+    // Nothing was stored for the refused one.
+    let (_, list) = h.get("/api/v1/solves").await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+
+    // Another account has its own allowance, even while the first queues.
+    let cookie = h.register("amiya").await;
+    let (status, _, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/solves",
+            Some(json!({ "request": quick_solve() })),
+            &[("cookie", &cookie)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+
+    // Once the first has finished, there is room again.
+    let (status, _) = h
+        .post(&format!("/api/v1/solves/{first}/stop"), json!({}))
+        .await;
+    assert!(status.is_success(), "{status}");
+    h.wait_for(&first, "the stopped solve to finish", is("done"))
+        .await;
+    h.wait_idle().await;
+    let next = h
+        .create("solves", json!({ "request": quick_solve() }))
+        .await;
+    h.wait_for(&next, "the next solve", is("done")).await;
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn an_account_may_have_only_so_many_simulations(pool: PgPool) {
+    let h = Harness::signed_in(
+        pool,
+        Limits {
+            max_simulations_per_account: NonZeroUsize::MIN,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let id = h
+        .create("solves", json!({ "request": quick_solve() }))
+        .await;
+    h.wait_for(&id, "the solve", is("done")).await;
+
+    // While the account's one slot is taken, every kind of simulation waits
+    // its turn, but the best finalist's, already simulated, is served.
+    let held = h.state.simulations.take(h.user_id().await).unwrap();
+    for (uri, body) in [
+        ("/api/v1/simulate", Some(example("243-base.json"))),
+        ("/api/v1/evaluate", Some(example("243-base.json"))),
+        (
+            &*format!("/api/v1/solves/{id}/candidates/1/simulation"),
+            None,
+        ),
+    ] {
+        let method = if body.is_some() {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        let (status, _, err) = h.send(method, uri, body, &[]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{uri}: {err}");
+        assert!(error_of(&err).contains("1 simulations running"), "{err}");
+    }
+    let (status, _) = h
+        .get(&format!("/api/v1/solves/{id}/candidates/0/simulation"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Another account is not held up; freeing the slot lets the first go on.
+    let cookie = h.register("amiya").await;
+    let (status, _, _) = h
+        .send(
+            Method::POST,
+            "/api/v1/evaluate",
+            Some(example("243-base.json")),
+            &[("cookie", &cookie)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    drop(held);
+    let (status, _) = h.post("/api/v1/simulate", example("243-base.json")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn request_bodies_are_capped(pool: PgPool) {
+    let h = Harness::signed_in(pool, Limits::default()).await;
+    // Signing up and in: room for the longest password, not much more.
+    let padding = "x".repeat(MAX_SIGN_IN_BODY);
+    let body = json!({ "username": "doctor", "password": padding });
+    for uri in ["/api/v1/auth/login", "/api/v1/auth/register"] {
+        let (status, err) = h.post(uri, body.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+        assert!(err.get("error").is_some(), "{err}");
+    }
+    // Everything else: rosters and requests far larger than any tool
+    // exports, but no larger than that.
+    let mut roster = json!({ "roster": {}, "name": "x".repeat(MAX_BODY) });
+    let (status, err) = h.post("/api/v1/rosters", roster.clone()).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{err}");
+    assert!(err.get("error").is_some(), "{err}");
+    roster["name"] = json!("x".repeat(MAX_BODY / 2));
+    let (status, err) = h.post("/api/v1/rosters", roster).await;
+    assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE, "{err}");
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn stopped_or_deleted_solves_leave_the_queue_at_once(pool: PgPool) {
+    // While the one slot is taken, solves wait in line. Stopping or deleting
+    // one lets its runner go at once, and gives back its place.
+    let h = Harness::signed_in(
+        pool,
+        Limits {
+            max_running_solves: 1,
+            max_solves_per_account: NonZeroUsize::new(3).unwrap(),
+            ..Limits::default()
+        },
+    )
+    .await;
+    let running = h
+        .create("solves", json!({ "request": endless_solve() }))
+        .await;
+    h.wait_for(&running, "the first to run", is("running"))
+        .await;
+    let stopped = h
+        .create("solves", json!({ "request": quick_solve() }))
+        .await;
+    let deleted = h
+        .create("solves", json!({ "request": quick_solve() }))
+        .await;
+    let waiting = |n: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let jobs = h.state.jobs.clone();
+        async move {
+            while jobs.waiting() != n {
+                assert!(
+                    Instant::now() < deadline,
+                    "{} waiting, not {n}",
+                    jobs.waiting()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+    waiting(2).await;
+    let (status, _) = h
+        .post(&format!("/api/v1/solves/{stopped}/stop"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    waiting(1).await;
+    let (status, _) = h.delete(&format!("/api/v1/solves/{deleted}")).await;
+    assert!(status.is_success(), "{status}");
+    waiting(0).await;
+    // Both places are free again.
+    for _ in 0..2 {
+        h.create("solves", json!({ "request": quick_solve() }))
+            .await;
+    }
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn a_deleted_solve_keeps_its_place_until_it_has_wound_down(pool: PgPool) {
+    // Deleting a running solve stops its search, but it holds its slot until
+    // the search has wound down, and its place among the account's solves
+    // is held as long.
+    let h = Harness::signed_in(
+        pool,
+        Limits {
+            max_solves_per_account: NonZeroUsize::MIN,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let running = h
+        .create("solves", json!({ "request": endless_solve() }))
+        .await;
+    h.wait_for(&running, "it to run", is("running")).await;
+    let (status, _) = h.delete(&format!("/api/v1/solves/{running}")).await;
+    assert!(status.is_success(), "{status}");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while h.state.jobs.running() > 0 {
+        assert_eq!(
+            h.state.jobs.live_count(),
+            1,
+            "a slot is held with no place taken"
+        );
+        assert!(Instant::now() < deadline, "the search never wound down");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    h.wait_idle().await;
+    h.create("solves", json!({ "request": quick_solve() }))
+        .await;
 }

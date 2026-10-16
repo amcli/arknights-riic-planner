@@ -85,8 +85,10 @@ fn check_solve(data: &GameData, req: &SolveRequest) -> Result<(), ApiError> {
 }
 
 /// `POST /api/v1/solves`: validates, stores the job as `pending`, answers
-/// `202`, and queues it. Storing and queueing finish together even if the
-/// client goes away, so no stored job is left unqueued.
+/// `202`, and queues it, or answers `429` if the account already has as
+/// many solves queued or running as it may. Storing and queueing finish
+/// together even if the client goes away, so no stored job is left
+/// unqueued.
 pub async fn create(
     State(s): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -99,11 +101,20 @@ pub async fn create(
     let value = serde_json::to_value(&job).map_err(ApiError::internal)?;
     let doc = Document::new(user.id, body.name, value);
     let meta = doc.meta();
+    let max = s.limits.max_solves_per_account;
+    if !s.jobs.admit(doc.owner, doc.id, max) {
+        return Err(ApiError::too_many_requests(format!(
+            "you already have {max} solves queued or running; stop one or wait for one to finish"
+        )));
+    }
     let state = s.clone();
     to_completion(async move {
-        state.store.insert(Collection::Solves, &doc).await?;
-        jobs::enqueue(&state, doc.owner, doc.id, job);
-        Ok::<_, ApiError>(())
+        if let Err(e) = state.store.insert(Collection::Solves, &doc).await {
+            state.jobs.withdraw(doc.id);
+            return Err(ApiError::from(e));
+        }
+        jobs::start(&state, doc.id, job);
+        Ok(())
     })
     .await??;
     let summary = SolveSummary {
@@ -193,7 +204,7 @@ pub async fn stop(
 /// `GET /api/v1/solves/{id}/candidates/{n}/simulation`: the full
 /// simulation of finalist `n` (0 is the best), run the way the solve scored
 /// it. The best one's comes from the result; the others are simulated on
-/// request.
+/// request, in one of the account's simulation slots.
 pub async fn candidate_simulation(
     State(s): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -218,10 +229,14 @@ pub async fn candidate_simulation(
     {
         return Ok(Json(best).into_response());
     }
+    let slot = s.simulations.take(user.id)?;
     let (data, request, assignment) = (s.data.clone(), job.request, candidate.assignment.clone());
-    let sim = blocking(move || ak_solver::simulate_candidate(&data, &request, &assignment))
-        .await?
-        .map_err(ApiError::bad_request)?;
+    let sim = blocking(move || {
+        let _slot = slot;
+        ak_solver::simulate_candidate(&data, &request, &assignment)
+    })
+    .await?
+    .map_err(ApiError::bad_request)?;
     Ok(Json(sim).into_response())
 }
 

@@ -6,6 +6,7 @@
 //! working directory or above it fills in any the environment lacks.
 
 use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,8 +14,10 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::http::{HeaderValue, Method, header};
 use clap::{Args, Parser, Subcommand};
+use ipnet::IpNet;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use ak_api::throttle::Rate;
 use ak_api::{AppState, Jobs, Limits};
 use ak_data::{Strictness, load_source};
 use ak_store::{PoolConfig, Store};
@@ -97,6 +100,50 @@ struct Serve {
     /// one).
     #[arg(long, env = "AK_API_MAX_RUNNING_SOLVES")]
     max_running_solves: Option<usize>,
+    /// Solves one account may have queued or running at once.
+    #[arg(
+        long,
+        env = "AK_API_MAX_SOLVES_PER_ACCOUNT",
+        default_value_t = Limits::DEFAULT_MAX_SOLVES_PER_ACCOUNT
+    )]
+    max_solves_per_account: NonZeroUsize,
+    /// Simulations (evaluate, simulate, a finalist's) one account may have
+    /// computing at once.
+    #[arg(
+        long,
+        env = "AK_API_MAX_SIMULATIONS_PER_ACCOUNT",
+        default_value_t = Limits::DEFAULT_MAX_SIMULATIONS_PER_ACCOUNT
+    )]
+    max_simulations_per_account: NonZeroUsize,
+    /// Requests one client may make per minute, all routes together, once
+    /// its burst is spent.
+    #[arg(long, env = "AK_API_REQUESTS_PER_MINUTE", default_value_t = Limits::DEFAULT_REQUESTS.per_minute)]
+    requests_per_minute: NonZeroU32,
+    /// Requests one client may make at once.
+    #[arg(long, env = "AK_API_REQUEST_BURST", default_value_t = Limits::DEFAULT_REQUESTS.burst)]
+    request_burst: NonZeroU32,
+    /// Sign-ups and sign-ins one client may make per minute, once its burst
+    /// is spent.
+    #[arg(long, env = "AK_API_SIGN_INS_PER_MINUTE", default_value_t = Limits::DEFAULT_SIGN_INS.per_minute)]
+    sign_ins_per_minute: NonZeroU32,
+    /// Sign-ups and sign-ins one client may make at once.
+    #[arg(long, env = "AK_API_SIGN_IN_BURST", default_value_t = Limits::DEFAULT_SIGN_INS.burst)]
+    sign_in_burst: NonZeroU32,
+    /// A reverse proxy trusted to name the client in X-Forwarded-For: an
+    /// address such as 127.0.0.1, or a block such as 10.0.0.0/8. Repeat the
+    /// flag or separate them with commas. None by default: clients are told
+    /// apart by the address they connect from, and the header is ignored,
+    /// since any client could send it. Behind a reverse proxy, list it, or
+    /// every client is the proxy and all share one budget, the sign-in one
+    /// included; the proxy must append to X-Forwarded-For (X-Real-IP alone is
+    /// not read).
+    #[arg(
+        long = "trusted-proxy",
+        env = "AK_API_TRUSTED_PROXIES",
+        value_delimiter = ',',
+        value_parser = ak_api::client::parse_trusted
+    )]
+    trusted_proxies: Vec<IpNet>,
 }
 
 #[tokio::main]
@@ -162,6 +209,17 @@ async fn serve(cli: Serve) -> anyhow::Result<()> {
         max_running_solves: cli
             .max_running_solves
             .unwrap_or_else(Limits::default_max_running_solves),
+        max_solves_per_account: cli.max_solves_per_account,
+        max_simulations_per_account: cli.max_simulations_per_account,
+        requests: Rate {
+            per_minute: cli.requests_per_minute,
+            burst: cli.request_burst,
+        },
+        sign_ins: Rate {
+            per_minute: cli.sign_ins_per_minute,
+            burst: cli.sign_in_burst,
+        },
+        trusted_proxies: cli.trusted_proxies,
     };
     tracing::info!(?limits, "limits");
     let state = AppState::new(
@@ -171,6 +229,7 @@ async fn serve(cli: Serve) -> anyhow::Result<()> {
         limits,
     );
     tokio::spawn(ak_api::auth::session::sweep(state.store.clone()));
+    tokio::spawn(ak_api::throttle::sweep(state.clone()));
     let resumed = ak_api::jobs::resume(&state)
         .await
         .context("resuming unfinished solves")?;
@@ -186,6 +245,9 @@ async fn serve(cli: Serve) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {}", cli.addr))?;
     tracing::info!("listening on http://{}", cli.addr);
+    // Each request learns the address it came from, which the per-client
+    // limits count by.
+    let app = app.into_make_service_with_connect_info::<SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.jobs.clone()))
         .await?;
@@ -195,6 +257,8 @@ async fn serve(cli: Serve) -> anyhow::Result<()> {
 }
 
 /// A CORS layer for the given origins, or none when the list is empty.
+/// `Retry-After` is exposed so that a listed origin can see how long a
+/// `429` asks it to wait.
 fn cors_layer(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
     let origins: Vec<HeaderValue> = origins
         .iter()
@@ -210,7 +274,8 @@ fn cors_layer(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-            .allow_headers([header::CONTENT_TYPE, header::ACCEPT]),
+            .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+            .expose_headers([header::RETRY_AFTER]),
     ))
 }
 
@@ -248,6 +313,37 @@ mod tests {
     }
 
     #[test]
+    fn limits_come_from_flags() {
+        let cli = Cli::try_parse_from([
+            "ak-api",
+            "--database-url",
+            "postgres://x",
+            "--trusted-proxy",
+            "127.0.0.1,10.0.0.0/8",
+            "--sign-in-burst",
+            "3",
+        ])
+        .unwrap_or_else(|e| panic!("{e}"));
+        let proxies: Vec<String> = cli
+            .serve
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(proxies, ["127.0.0.1/32", "10.0.0.0/8"]);
+        assert_eq!(cli.serve.sign_in_burst.get(), 3);
+        assert_eq!(cli.serve.request_burst, Limits::DEFAULT_REQUESTS.burst);
+        for bad in [
+            ["--trusted-proxy", "localhost"],
+            ["--request-burst", "0"],
+            ["--max-solves-per-account", "0"],
+        ] {
+            let args = ["ak-api", "--database-url", "postgres://x", bad[0], bad[1]];
+            assert!(Cli::try_parse_from(args).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn migrate_needs_only_its_own_url() {
         let cli = Cli::try_parse_from(["ak-api", "migrate", "--database-url", "postgres://x"])
             .unwrap_or_else(|e| panic!("{e}"));
@@ -274,5 +370,16 @@ mod tests {
             Some("http://localhost:5173")
         );
         assert_eq!(preflight(&app, "https://evil.example").await, None);
+
+        let req = Request::builder()
+            .uri("/x")
+            .header(header::ORIGIN, "http://localhost:5173")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+            "retry-after"
+        );
     }
 }

@@ -1,5 +1,6 @@
 //! Synchronous Layer 4 endpoints: evaluate one instant, or simulate a
-//! horizon.
+//! horizon. Each takes one of the account's simulation slots
+//! ([`crate::throttle::InFlight`]) and holds it until the computation ends.
 
 use axum::Json;
 use axum::extract::State;
@@ -34,8 +35,10 @@ pub async fn evaluate(
     Body(body): Body<Value>,
 ) -> Result<Response, ApiError> {
     let (req, _) = refs::resolve::<SimRequest>(&s, user.id, body).await?;
+    let slot = s.simulations.take(user.id)?;
     let data = s.data.clone();
     let snapshot = blocking(move || {
+        let _slot = slot;
         ak_eval::evaluate(&data, &req.base, &req.assignment, &req.roster, &req.config)
     })
     .await?
@@ -53,9 +56,13 @@ pub async fn simulate(
 ) -> Result<Response, ApiError> {
     let (req, _) = refs::resolve::<SimRequest>(&s, user.id, body).await?;
     check_ticks(&req.config, &s.limits)?;
+    let slot = s.simulations.take(user.id)?;
     let data = s.data.clone();
-    let result = blocking(move || ak_eval::simulate(&data, &req))
-        .await?
-        .map_err(ApiError::bad_request)?;
+    let result = blocking(move || {
+        let _slot = slot;
+        ak_eval::simulate(&data, &req)
+    })
+    .await?
+    .map_err(ApiError::bad_request)?;
     Ok(Json(result).into_response())
 }
