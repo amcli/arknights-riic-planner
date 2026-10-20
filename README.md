@@ -319,6 +319,11 @@ Krooster sends no CORS headers, so the browser cannot. It is the only route
 that reaches outside the server: the username must be one Krooster allows
 (at most 32 letters, digits, `_` or `-`), the fetch gives up after 15
 seconds, an unknown user is a `404`, and a Krooster failure is a `502`.
+Answers are kept in memory, so Krooster is asked about a name at most once
+in a while however many people fetch it: a roster for 5 minutes, served
+with its age in seconds as `Age`, and an unknown user for 1 minute.
+Failures are not kept. Requests for a name already being fetched wait for
+that fetch, and at most 4 fetches run at once.
 
 **Solves** are a queue. `POST /api/v1/solves` validates the request the way
 the solver would, stores it as `pending` and answers `202`. At most
@@ -532,7 +537,8 @@ the screen stays behind it with anything unsaved until the same account
 signs in again; another account gets fresh screens. Remembered picks (the
 last roster and base) are forgotten when a different account signs in.
 
-- **Rosters** (`#/rosters`): fetch a Krooster roster by username, or paste
+- **Rosters** (`#/rosters`): fetch a Krooster roster by username (one the
+  server kept from a minute or more ago says how old it is), or paste
   or open another tool's export (or the canonical JSON), preview what it
   reads as, with every warning named, and save it. A stored roster shows its
   import report and its operators by rarity, filtered by name or promotion.
@@ -714,7 +720,7 @@ API endpoints. All but the game data, `/healthz` and signing up, in or out need 
 - `POST /api/v1/simulate` — request → totals, per-room and per-operator reports, morale trajectory, events, warnings
 - `POST /api/v1/rosters`, `GET /api/v1/rosters`, `GET|PUT|DELETE /api/v1/rosters/{id}` — body `{ name?, source?, roster }`, where `source` is `manual` (default), `krooster` or `ak-planner`; answers with the import report
 - `POST /api/v1/rosters/preview` — same body; the roster and import report, not stored
-- `GET /api/v1/import/krooster/{username}` — the roster in a Krooster user's public profile, `{ data: { roster } }`, to store with source `krooster`
+- `GET /api/v1/import/krooster/{username}` — the roster in a Krooster user's public profile, `{ data: { roster } }`, to store with source `krooster`; kept for a few minutes, with its age in `Age`
 - `POST /api/v1/bases`, `GET /api/v1/bases`, `GET|PUT|DELETE /api/v1/bases/{id}` — body `{ name?, base }`, validated
 - `POST /api/v1/solves` — body `{ name?, request }`, answers `202` with the job, `429` if the account already has as many queued or running as it may; `GET /api/v1/solves` lists jobs with status
 - `GET /api/v1/solves/{id}` — status, the request as it ran, `progress` while running, the result or error once finished

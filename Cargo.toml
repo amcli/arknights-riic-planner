@@ -48,6 +48,8 @@ serde_path_to_error = "0.1"
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap"] }
 # Trusted proxy addresses and blocks.
 ipnet = "2"
+# Krooster answers kept in memory, one fetch per name at a time.
+moka = { version = "0.12", features = ["future"] }
 # Test-only: drive the router in-process.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

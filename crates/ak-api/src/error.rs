@@ -20,7 +20,7 @@ use serde::de::DeserializeOwned;
 use ak_store::StoreError;
 
 /// An error response: a status and a readable message.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiError {
     /// HTTP status.
     pub status: StatusCode,

@@ -128,6 +128,9 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
   const [preview, setPreview] = useState<RosterView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // When Krooster sent the roster fetched into the box, if the server's copy
+  // was already a minute old; null otherwise, and once the box changes.
+  const [sentAt, setSentAt] = useState<string | null>(null);
   const help = SOURCES.find((s) => s.id === source)?.help ?? "";
 
   const input = (): unknown => {
@@ -148,6 +151,7 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
         setPreview(null);
         setText("");
         setLabel("");
+        setSentAt(null);
         onSaved(saved.id);
       } else {
         setPreview(await api.rosters.preview(roster, source));
@@ -166,9 +170,10 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
     setError(null);
     setBusy(true);
     try {
-      const exported = await api.krooster.roster(user);
+      const { roster: exported, age } = await api.krooster.roster(user);
       remember("krooster-user", user);
       setText(JSON.stringify(exported));
+      setSentAt(age >= 60 ? new Date(Date.now() - age * 1000).toISOString() : null);
       if (!label) setLabel(user);
       setPreview(await api.rosters.preview(exported, "krooster"));
     } catch (err) {
@@ -184,6 +189,7 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
     file.text().then(
       (t) => {
         setText(t);
+        setSentAt(null);
         setPreview(null);
         if (!label) setLabel(file.name.replace(/\.[^.]+$/, ""));
       },
@@ -211,6 +217,7 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
             setSource(v);
             setPreview(null);
             setError(null);
+            setSentAt(null);
           }}
         />
         <details className="hint">
@@ -240,6 +247,12 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
             </button>
           </form>
         )}
+        {source === "krooster" && sentAt && (
+          <p className="muted small">
+            Krooster sent this {ago(sentAt)}, and the server reuses it for a
+            few minutes; if you have changed your roster on Krooster since, fetch again shortly.
+          </p>
+        )}
         <textarea
           className="mono"
           rows={4}
@@ -249,6 +262,7 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
           aria-label="Roster export"
           onChange={(e) => {
             setText(e.target.value);
+            setSentAt(null);
             setPreview(null);
           }}
         />
@@ -263,6 +277,7 @@ function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
               className="ghost sm"
               onClick={() => {
                 setText(JSON.stringify(EXAMPLE_ROSTER, null, 2));
+                setSentAt(null);
                 setLabel("Example roster");
                 setPreview(null);
               }}

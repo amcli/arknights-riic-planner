@@ -552,10 +552,17 @@ export const api = {
   krooster: {
     /**
      * The roster in a Krooster user's public profile, `{ data: { roster } }`,
-     * fetched by the server (Krooster sends no CORS headers). Store it as a
-     * `krooster` roster.
+     * fetched by the server (Krooster sends no CORS headers), and its age in
+     * seconds: the server reuses a fetched roster for a few minutes. Store it
+     * as a `krooster` roster.
      */
-    roster: (username: string) => getJson<unknown>(`/api/v1/import/krooster/${encodeURIComponent(username)}`),
+    roster: async (username: string) => {
+      const res = await fetch(`/api/v1/import/krooster/${encodeURIComponent(username)}`, {
+        headers: { Accept: "application/json" },
+      });
+      const roster = await parse<unknown>(res);
+      return { roster, age: Number(res.headers.get("Age") ?? 0) };
+    },
   },
   bases: {
     create: (base: BaseConfig, name?: string) => sendJson<DocumentMeta>("POST", "/api/v1/bases", { name, base }),

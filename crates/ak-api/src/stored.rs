@@ -34,7 +34,8 @@ pub async fn blocking<T: Send + 'static>(
 }
 
 /// Runs `work` to the end even if the request is dropped (the client
-/// disconnects) part way through, for changes that must not stop halfway.
+/// disconnects) part way through: changes that must not stop halfway, and
+/// work other requests may be waiting on.
 pub async fn to_completion<T: Send + 'static>(
     work: impl Future<Output = T> + Send + 'static,
 ) -> Result<T, ApiError> {

@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use ak_api::auth::backoff::{FIRST_WAIT, FREE_FAILURES};
 use ak_api::auth::session::Token;
 use ak_api::jobs::{JobStatus, SolveJob};
-use ak_api::krooster::Krooster;
+use ak_api::krooster::{Krooster, MAX_FETCHES};
 use ak_api::refs::Refs;
 use ak_api::throttle::Rate;
 use ak_api::{AppState, Limits, MAX_BODY, MAX_SIGN_IN_BODY};
@@ -1570,60 +1571,97 @@ async fn rosters_import_from_other_tools(pool: PgPool) {
     assert!(best["score"].as_f64().unwrap() > 0.0, "{}", best["score"]);
 }
 
-/// A stand-in for Krooster's profile route on a local port, and the paths
-/// it has been asked for. `/api/u/example-doctor` answers the profile
-/// fixture, `/api/u/garbled` a web page, `/api/u/down` a server error, and
-/// any other user Krooster's `404`.
-fn fake_krooster() -> (String, Arc<Mutex<Vec<String>>>) {
+/// A stand-in Krooster on a local port.
+struct FakeKrooster {
+    base: String,
+    /// The paths asked for, in order.
+    asked: Arc<Mutex<Vec<String>>>,
+    /// The most requests it was answering at once.
+    most_at_once: Arc<AtomicUsize>,
+}
+
+impl FakeKrooster {
+    /// How many times `path` was asked for.
+    fn asks(&self, path: &str) -> usize {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == path)
+            .count()
+    }
+}
+
+/// A Krooster that knows `example-doctor` and, answering after 300 ms,
+/// every `slow-…`; fails for `down`; answers `garbled` with a web page;
+/// and knows nobody else. Each connection is answered on its own thread.
+fn fake_krooster() -> FakeKrooster {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let asked = Arc::new(Mutex::new(Vec::new()));
-    let log = asked.clone();
-    let profile = export("krooster-profile.json").to_string();
+    let most_at_once = Arc::new(AtomicUsize::new(0));
+    let (log, most) = (asked.clone(), most_at_once.clone());
+    let profile: Arc<str> = export("krooster-profile.json").to_string().into();
+    let in_hand = Arc::new(AtomicUsize::new(0));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let mut head = Vec::new();
-            let mut buf = [0; 1024];
-            while !head.ends_with(b"\r\n\r\n") {
-                match stream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => head.extend_from_slice(&buf[..n]),
+            let (log, most, profile, in_hand) =
+                (log.clone(), most.clone(), profile.clone(), in_hand.clone());
+            std::thread::spawn(move || {
+                let mut head = Vec::new();
+                let mut buf = [0; 1024];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
                 }
-            }
-            let head = String::from_utf8_lossy(&head);
-            let path = head
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_owned();
-            let (status, kind, body) = match path.as_str() {
-                "/api/u/example-doctor" => ("200 OK", "application/json", profile.as_str()),
-                "/api/u/garbled" => ("200 OK", "text/html", "<!DOCTYPE html><p>Krooster</p>"),
-                "/api/u/down" => (
-                    "500 Internal Server Error",
-                    "text/plain",
-                    "Internal server error.",
-                ),
-                _ => ("404 Not Found", "text/plain", "User not found"),
-            };
-            log.lock().unwrap().push(path);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+                let head = String::from_utf8_lossy(&head);
+                let path = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_owned();
+                log.lock().unwrap().push(path.clone());
+                most.fetch_max(in_hand.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                let (status, kind, body) = match path.as_str() {
+                    "/api/u/example-doctor" => ("200 OK", "application/json", &*profile),
+                    slow if slow.starts_with("/api/u/slow-") => {
+                        std::thread::sleep(Duration::from_millis(300));
+                        ("200 OK", "application/json", &*profile)
+                    }
+                    "/api/u/garbled" => ("200 OK", "text/html", "<!DOCTYPE html><p>Krooster</p>"),
+                    "/api/u/down" => (
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "Internal server error.",
+                    ),
+                    _ => ("404 Not Found", "text/plain", "User not found"),
+                };
+                in_hand.fetch_sub(1, Ordering::SeqCst);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
         }
     });
-    (base, asked)
+    FakeKrooster {
+        base,
+        asked,
+        most_at_once,
+    }
 }
 
 #[sqlx::test(migrator = "ak_store::MIGRATOR")]
 async fn rosters_fetched_from_krooster(pool: PgPool) {
-    let (krooster, asked) = fake_krooster();
+    let krooster = fake_krooster();
     let h = Harness::signed_in(pool, Limits::default())
         .await
-        .with_krooster(&krooster);
+        .with_krooster(&krooster.base);
+    let asked = &krooster.asked;
 
     // The profile's roster, without the account details and supports.
     let (status, fetched) = h.get("/api/v1/import/krooster/Example-Doctor").await;
@@ -2216,4 +2254,133 @@ async fn a_deleted_solve_keeps_its_place_until_it_has_wound_down(pool: PgPool) {
     h.wait_idle().await;
     h.create("solves", json!({ "request": quick_solve() }))
         .await;
+}
+
+/// GETs every one of `uris` at once, signed in as the harness; answers the
+/// statuses.
+async fn all_at_once(h: &Harness, uris: impl IntoIterator<Item = String>) -> Vec<StatusCode> {
+    let mut requests = tokio::task::JoinSet::new();
+    for uri in uris {
+        let (app, cookie) = (h.app.clone(), h.cookie.clone().unwrap());
+        requests.spawn(async move {
+            let req = Request::get(uri)
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap().status()
+        });
+    }
+    requests.join_all().await
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn krooster_answers_are_kept_for_a_while(pool: PgPool) {
+    let krooster = fake_krooster();
+    let h = Harness::signed_in(pool, Limits::default())
+        .await
+        .with_krooster(&krooster.base);
+    let get = |name: &str| {
+        let h = &h;
+        let uri = format!("/api/v1/import/krooster/{name}");
+        async move { h.send(Method::GET, &uri, None, &[]).await }
+    };
+    let age =
+        |headers: &HeaderMap| -> u64 { headers[header::AGE].to_str().unwrap().parse().unwrap() };
+
+    // A roster, asked for in any case, is fetched once, then served from
+    // memory with its age.
+    let (status, headers, first) = get("example-doctor").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(age(&headers) < 5);
+    let (status, headers, again) = get("Example-Doctor").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again, first);
+    assert!(age(&headers) < 5);
+    assert_eq!(krooster.asks("/api/u/example-doctor"), 1);
+
+    // So is the news that there is no such user, each time named as asked.
+    for name in ["nobody", "NoBody"] {
+        let (status, _, err) = get(name).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error_of(&err), format!("no Krooster user named {name:?}"));
+    }
+    assert_eq!(krooster.asks("/api/u/nobody"), 1);
+
+    // Krooster's failures, and answers that are not a profile, are not.
+    for _ in 0..2 {
+        assert_eq!(get("down").await.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(get("garbled").await.0, StatusCode::BAD_GATEWAY);
+    }
+    assert_eq!(krooster.asks("/api/u/down"), 2);
+    assert_eq!(krooster.asks("/api/u/garbled"), 2);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn krooster_is_asked_once_per_name_and_a_few_names_at_a_time(pool: PgPool) {
+    let krooster = fake_krooster();
+    let h = Harness::signed_in(pool, Limits::default())
+        .await
+        .with_krooster(&krooster.base);
+
+    // Eight requests for one name at once share a single fetch.
+    let uri = "/api/v1/import/krooster/slow-one".to_owned();
+    let statuses = all_at_once(&h, std::iter::repeat_n(uri, 8)).await;
+    assert!(
+        statuses.iter().all(|s| *s == StatusCode::OK),
+        "{statuses:?}"
+    );
+    assert_eq!(krooster.asks("/api/u/slow-one"), 1);
+
+    // Eight names at once: Krooster is asked about a few at a time.
+    let uris = (0..8).map(|i| format!("/api/v1/import/krooster/slow-{i}"));
+    let statuses = all_at_once(&h, uris).await;
+    assert!(
+        statuses.iter().all(|s| *s == StatusCode::OK),
+        "{statuses:?}"
+    );
+    assert_eq!(krooster.most_at_once.load(Ordering::SeqCst), MAX_FETCHES);
+}
+
+#[sqlx::test(migrator = "ak_store::MIGRATOR")]
+async fn a_krooster_fetch_carries_on_when_its_request_is_dropped(pool: PgPool) {
+    let krooster = fake_krooster();
+    let h = Harness::signed_in(pool, Limits::default())
+        .await
+        .with_krooster(&krooster.base);
+    let names: Vec<String> = (0..MAX_FETCHES).map(|i| format!("slow-gone-{i}")).collect();
+    let uri = |name: &str| format!("/api/v1/import/krooster/{name}");
+
+    // Requests that start as many fetches as may run at once, then go away
+    // while Krooster is still answering.
+    let mut gone = tokio::task::JoinSet::new();
+    for name in &names {
+        let (app, cookie) = (h.app.clone(), h.cookie.clone().unwrap());
+        let req = Request::get(uri(name))
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        gone.spawn(async move { app.oneshot(req).await });
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while names
+        .iter()
+        .any(|n| krooster.asks(&format!("/api/u/{n}")) == 0)
+    {
+        assert!(Instant::now() < deadline, "Krooster was never asked");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(gone);
+
+    // Their fetches carried on: asked again, those names get the answers
+    // already on their way, and other names wait for a place.
+    let others = (0..MAX_FETCHES).map(|i| uri(&format!("slow-next-{i}")));
+    let statuses = all_at_once(&h, names.iter().map(|n| uri(n)).chain(others)).await;
+    assert!(
+        statuses.iter().all(|s| *s == StatusCode::OK),
+        "{statuses:?}"
+    );
+    for name in &names {
+        assert_eq!(krooster.asks(&format!("/api/u/{name}")), 1, "{name}");
+    }
+    assert!(krooster.most_at_once.load(Ordering::SeqCst) <= MAX_FETCHES);
 }
