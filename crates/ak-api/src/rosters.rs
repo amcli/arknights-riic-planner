@@ -20,6 +20,7 @@ use ak_domain::{GameData, Roster};
 use ak_store::{Collection, DocumentMeta};
 
 use crate::AppState;
+use crate::auth::CurrentUser;
 use crate::error::{ApiError, Body, from_value};
 use crate::stored::{self, Stored};
 
@@ -137,10 +138,11 @@ fn saved(meta: DocumentMeta, view: RosterView) -> Saved {
 /// with its metadata and, for an import, the report.
 pub async fn create(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Body(body): Body<RosterBody>,
 ) -> Result<Response, ApiError> {
     let view = read(&s.data, body.source, body.roster)?;
-    let meta = stored::insert(&s, Collection::Rosters, body.name, &view).await?;
+    let meta = stored::insert(&s, user.id, Collection::Rosters, body.name, &view).await?;
     Ok((StatusCode::CREATED, Json(saved(meta, view))).into_response())
 }
 
@@ -148,19 +150,27 @@ pub async fn create(
 /// store, without storing it.
 pub async fn preview(
     State(s): State<AppState>,
+    _: CurrentUser,
     Body(body): Body<RosterBody>,
 ) -> Result<Response, ApiError> {
     Ok(Json(read(&s.data, body.source, body.roster)?).into_response())
 }
 
 /// `GET /api/v1/rosters`.
-pub async fn list(State(s): State<AppState>) -> Result<Response, ApiError> {
-    Ok(Json(stored::listing(&s, Collection::Rosters).await?).into_response())
+pub async fn list(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> Result<Response, ApiError> {
+    Ok(Json(stored::listing(&s, user.id, Collection::Rosters).await?).into_response())
 }
 
 /// `GET /api/v1/rosters/{id}`.
-pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    let doc = stored::fetch(&s, Collection::Rosters, id).await?;
+pub async fn get(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let doc = stored::fetch(&s, user.id, Collection::Rosters, id).await?;
     let view: Stored<RosterView> = stored::view(doc)?;
     Ok(Json(view).into_response())
 }
@@ -169,18 +179,20 @@ pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Re
 /// it is an export.
 pub async fn put(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     Body(body): Body<RosterBody>,
 ) -> Result<Response, ApiError> {
     let view = read(&s.data, body.source, body.roster)?;
-    let meta = stored::update(&s, Collection::Rosters, id, body.name, &view).await?;
+    let meta = stored::update(&s, user.id, Collection::Rosters, id, body.name, &view).await?;
     Ok(Json(saved(meta, view)).into_response())
 }
 
 /// `DELETE /api/v1/rosters/{id}`.
 pub async fn delete(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    stored::remove(&s, Collection::Rosters, id).await
+    stored::remove(&s, user.id, Collection::Rosters, id).await
 }

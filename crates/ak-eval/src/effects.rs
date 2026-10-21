@@ -36,6 +36,15 @@
 //! exhausted Control Center operator no longer relieves the base. Idle
 //! operators (Training Room trainees, or an assistant with no training
 //! running) contribute nothing and their morale does not change.
+//!
+//! Each operator is also marked when they *count*: one of their skills took
+//! effect, the model could not tell what one of their skills does, another
+//! skill picked them out by who they are, or they work in the Reception
+//! Room, whose clue speed also rises with each occupant's rarity and
+//! promotion (not modelled, see `crate::rules`). Anyone else working is
+//! filler: any operator without skills for the room would do the same in
+//! their place. Those whose being there does something for others, a
+//! Dormitory's support above all, are marked as supporting it.
 
 use std::collections::BTreeMap;
 
@@ -210,6 +219,20 @@ pub struct MoodRate {
     pub exhausted: bool,
     /// True when stationed but neither working nor resting.
     pub idle: bool,
+    /// True when one of this operator's skills took effect (on a stat,
+    /// anyone's morale, the Workshop, a room count or others' contributions),
+    /// when the model could not tell what one of their skills does, or when
+    /// another operator's skill picked them out by who they are (by name,
+    /// faction, class or skill), or when they work in the Reception Room
+    /// (see the module docs). Someone working where this stays false
+    /// could be swapped for any operator without skills there and nothing
+    /// would change.
+    pub counted: bool,
+    /// True when their being here does something for another operator: a
+    /// skill of theirs raises, or would raise, another's morale after
+    /// stacking (Dormitory support, even while everyone there is rested), or
+    /// another operator's skill needs them in this room.
+    pub supports: bool,
 }
 
 /// Everything the evaluator computes for one instant.
@@ -245,6 +268,9 @@ pub fn evaluate(world: &World<'_>, dynamic: &Dynamic<'_>, warnings: &mut Warning
         warn: warnings,
         exhausted: vec![false; n],
         idle: vec![false; n],
+        counted: vec![false; n],
+        supports: vec![false; n],
+        probes: Vec::new(),
         extra_rooms: BTreeMap::new(),
         stats: Vec::new(),
         moods: Vec::new(),
@@ -297,6 +323,13 @@ struct Eval<'e, 'a> {
     warn: &'e mut Warnings,
     exhausted: Vec<bool>,
     idle: Vec<bool>,
+    /// See [`MoodRate::counted`].
+    counted: Vec<bool>,
+    /// See [`MoodRate::supports`].
+    supports: Vec<bool>,
+    /// Morale a skill would give a tired newcomer to its room, for rooms
+    /// where it reaches nobody yet; see [`Eval::apply`].
+    probes: Vec<MoodRec>,
     extra_rooms: BTreeMap<RoomType, i32>,
     stats: Vec<StatRec<'a>>,
     moods: Vec<MoodRec>,
@@ -341,6 +374,27 @@ impl<'e, 'a> Eval<'e, 'a> {
         !self.idle[o] && !self.exhausted[o]
     }
 
+    /// Marks `t` as picked out by who they are, for a condition that holds
+    /// because of them.
+    fn picked(&mut self, t: usize) -> bool {
+        self.counted[t] = true;
+        true
+    }
+
+    /// Whether `t` belongs to `group`, marking them when they do. When the
+    /// group has no membership definition, the owner `o` is marked instead:
+    /// what their skill does is then unknown.
+    fn member(&mut self, t: usize, group: &Group, o: usize, s: &BaseSkill) -> bool {
+        match self.w.in_group(t, group, &s.id, self.warn) {
+            Some(true) => self.picked(t),
+            Some(false) => false,
+            None => {
+                self.counted[o] = true;
+                false
+            }
+        }
+    }
+
     fn run(mut self) -> Snapshot {
         let w = self.w;
         let n = w.ops.len();
@@ -348,6 +402,10 @@ impl<'e, 'a> Eval<'e, 'a> {
             let role = w.role(o);
             self.idle[o] = role == Role::Idle;
             self.exhausted[o] = role == Role::Working && self.mood[o] <= EPS;
+            // Who works in the Reception Room matters beyond their skills.
+            self.counted[o] = role == Role::Working
+                && !self.exhausted[o]
+                && w.room_of(o).room.kind == RoomType::Meeting;
         }
 
         // Pass 1: facility counts.
@@ -360,6 +418,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                     self.warn.push(SimWarning::UnparsedSkill {
                         skill: s.id.clone(),
                     });
+                    self.counted[o] = true;
                     continue;
                 };
                 for c in &m.clauses {
@@ -367,6 +426,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                         && self.holds(&c.when, o, None, s)
                     {
                         *self.extra_rooms.entry(*room).or_default() += delta;
+                        self.counted[o] = true;
                     }
                 }
             }
@@ -406,6 +466,38 @@ impl<'e, 'a> Eval<'e, 'a> {
                 return;
             };
             let recipients = self.recipients(target, o, r, s);
+            // Nobody there needs it right now. Whether it would reach a
+            // tired newcomer still makes them support (a Dormitory is full
+            // of rested operators until the first tired one arrives), so it
+            // is recorded for one stand-in recipient per room and stacked
+            // like real records: of two single-target healers, only the
+            // stronger would reach anyone.
+            if v > EPS
+                && recipients.is_empty()
+                && matches!(
+                    target,
+                    MoodTarget::OneOtherInRoom | MoodTarget::DistributedInRoom
+                )
+            {
+                let others: Vec<usize> = self.w.rooms[r]
+                    .occupants
+                    .iter()
+                    .copied()
+                    .filter(|&t| t != o)
+                    .collect();
+                if others
+                    .into_iter()
+                    .any(|t| self.holds(&c.when, o, Some(t), s))
+                {
+                    self.probes.push(MoodRec {
+                        recipient: self.w.ops.len() + r,
+                        source: o,
+                        value: v,
+                        stacking,
+                        class: MoodClass::Single,
+                    });
+                }
+            }
             let class = match target {
                 MoodTarget::SelfOnly => MoodClass::OwnerOnly,
                 MoodTarget::AllInRoom | MoodTarget::OthersInRoom => MoodClass::WholeRoom,
@@ -509,7 +601,14 @@ impl<'e, 'a> Eval<'e, 'a> {
                     .natural_rooms(r, RoomType::Training)
                     .into_iter()
                     .filter(|&ri| {
-                        self.training_matches(ri, professions, subclass.as_deref(), *spec_level, s)
+                        self.training_matches(
+                            ri,
+                            professions,
+                            subclass.as_deref(),
+                            *spec_level,
+                            o,
+                            s,
+                        )
                     })
                     .collect();
                 self.stat(
@@ -541,6 +640,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                         mood_cost: None,
                     },
                 ));
+                self.counted[o] = true;
             }
             Effect::WorkshopMoodCost {
                 change,
@@ -558,6 +658,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                         mood_cost: Some(*change),
                     },
                 ));
+                self.counted[o] = true;
             }
             Effect::ScaleOthersContribution { stat, percent } => {
                 self.scalers.push(Scaler {
@@ -568,25 +669,38 @@ impl<'e, 'a> Eval<'e, 'a> {
                 });
             }
             Effect::FacilityCount { .. } | Effect::Mood { .. } => {}
-            Effect::ClueBias { .. } => self.warn.push(SimWarning::ClueBiasIgnored {
-                skill: s.id.clone(),
-            }),
-            Effect::GainResource { resource, .. } => {
+            // What these do is not modelled, so the owner counts: the model
+            // cannot say they do nothing.
+            Effect::ClueBias { .. } => {
+                self.warn.push(SimWarning::ClueBiasIgnored {
+                    skill: s.id.clone(),
+                });
+                self.counted[o] = true;
+            }
+            Effect::GainResource { resource, amount } => {
+                // The resource is not modelled, but who its amount counts
+                // (e.g. each Sui operator in a work area) is.
+                let _ = self.amount(amount, o, s, None);
                 self.warn.push(SimWarning::ResourceNotSimulated {
                     skill: s.id.clone(),
                     resource: resource.clone(),
                 });
+                self.counted[o] = true;
             }
             Effect::ConvertResource { from, .. } => {
                 self.warn.push(SimWarning::ResourceNotSimulated {
                     skill: s.id.clone(),
                     resource: from.clone(),
                 });
+                self.counted[o] = true;
             }
-            Effect::Unmodeled { summary } => self.warn.push(SimWarning::UnmodeledEffect {
-                skill: s.id.clone(),
-                summary: summary.clone(),
-            }),
+            Effect::Unmodeled { summary } => {
+                self.warn.push(SimWarning::UnmodeledEffect {
+                    skill: s.id.clone(),
+                    summary: summary.clone(),
+                });
+                self.counted[o] = true;
+            }
         }
     }
 
@@ -639,10 +753,13 @@ impl<'e, 'a> Eval<'e, 'a> {
         match scope {
             Scope::ThisRoom => vec![r],
             Scope::AllRooms(kind) => self.w.rooms_of(*kind),
-            Scope::RoomOf(who) => self
-                .find(who, s)
-                .map(|t| vec![self.w.ops[t].room])
-                .unwrap_or_default(),
+            Scope::RoomOf(who) => match self.find(who, s) {
+                Some(t) => {
+                    self.picked(t);
+                    vec![self.w.ops[t].room]
+                }
+                None => Vec::new(),
+            },
         }
     }
 
@@ -673,6 +790,7 @@ impl<'e, 'a> Eval<'e, 'a> {
         professions: &[Profession],
         subclass: Option<&str>,
         spec_level: Option<u8>,
+        o: usize,
         s: &BaseSkill,
     ) -> bool {
         if !self.w.training_active[ri] {
@@ -696,6 +814,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                         skill: s.id.clone(),
                         name: name.to_owned(),
                     });
+                    self.counted[o] = true;
                     return false;
                 }
             }
@@ -732,7 +851,13 @@ impl<'e, 'a> Eval<'e, 'a> {
                 .collect(),
             MoodTarget::Rooms(kind) => self.w.ops_in_rooms_of(*kind),
             MoodTarget::AllWorkAreas => self.w.ops_in_work_areas(),
-            MoodTarget::Named(who) => self.find(who, s).into_iter().collect(),
+            MoodTarget::Named(who) => {
+                let found = self.find(who, s);
+                if let Some(t) = found {
+                    self.picked(t);
+                }
+                found.into_iter().collect()
+            }
         }
     }
 
@@ -740,25 +865,45 @@ impl<'e, 'a> Eval<'e, 'a> {
         let r = self.w.ops[o].room;
         match p {
             Predicate::Always => true,
-            Predicate::CoworkerIs { who } => self
-                .find(who, s)
-                .is_some_and(|t| t != o && self.w.ops[t].room == r),
-            Predicate::OperatorInRoom { who, room } => self
-                .find(who, s)
-                .is_some_and(|t| self.w.room_of(t).room.kind == *room),
-            Predicate::OperatorInWorkArea { who } => self
-                .find(who, s)
-                .is_some_and(|t| self.w.room_of(t).room.kind.is_work_area()),
-            Predicate::OperatorInBase { who } => self.find(who, s).is_some(),
+            Predicate::CoworkerIs { who } => match self.find(who, s) {
+                Some(t) if t != o && self.w.ops[t].room == r => self.picked(t),
+                _ => false,
+            },
+            Predicate::OperatorInRoom { who, room } => match self.find(who, s) {
+                Some(t) if self.w.room_of(t).room.kind == *room => {
+                    // Being there is what the skill needs of them.
+                    if t != o {
+                        self.supports[t] = true;
+                    }
+                    self.picked(t)
+                }
+                _ => false,
+            },
+            Predicate::OperatorInWorkArea { who } => match self.find(who, s) {
+                Some(t) if self.w.room_of(t).room.kind.is_work_area() => self.picked(t),
+                _ => false,
+            },
+            Predicate::OperatorInBase { who } => match self.find(who, s) {
+                Some(t) => self.picked(t),
+                None => false,
+            },
+            // Every member is marked, not just the first found: any of
+            // them could be the one the condition relies on.
             Predicate::CoworkerIn { group } => {
                 let pool = self.w.rooms[r].occupants.clone();
-                pool.into_iter()
-                    .any(|t| t != o && self.w.in_group(t, group, &s.id, self.warn) == Some(true))
+                let mut any = false;
+                for t in pool {
+                    any |= t != o && self.member(t, group, o, s);
+                }
+                any
             }
             Predicate::GroupInRoom { group, room } => {
                 let pool = self.w.ops_in_rooms_of(*room);
-                pool.into_iter()
-                    .any(|t| t != o && self.w.in_group(t, group, &s.id, self.warn) == Some(true))
+                let mut any = false;
+                for t in pool {
+                    any |= t != o && self.member(t, group, o, s);
+                }
+                any
             }
             Predicate::AloneInRoom => self.w.rooms[r].occupants.len() == 1,
             Predicate::SelfMoodFull => !self.not_full(o),
@@ -769,13 +914,11 @@ impl<'e, 'a> Eval<'e, 'a> {
             Predicate::CountAtLeast { counter, n } => {
                 self.count(counter, o, s, None) >= f64::from(*n)
             }
-            Predicate::TargetIsOperator { who } => {
-                let found = self.find(who, s);
-                target.is_some() && found == target
-            }
-            Predicate::TargetIn { group } => {
-                target.is_some_and(|t| self.w.in_group(t, group, &s.id, self.warn) == Some(true))
-            }
+            Predicate::TargetIsOperator { who } => match (self.find(who, s), target) {
+                (Some(t), Some(target)) if t == target => self.picked(t),
+                _ => false,
+            },
+            Predicate::TargetIn { group } => target.is_some_and(|t| self.member(t, group, o, s)),
             Predicate::TrainingProfession {
                 profession,
                 spec_level,
@@ -806,6 +949,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                     skill: s.id.clone(),
                     text: text.clone(),
                 });
+                self.counted[o] = true;
                 false
             }
         }
@@ -832,7 +976,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                 };
                 pool.into_iter()
                     .filter(|&t| !(*excluding_self && t == o))
-                    .filter(|&t| self.w.in_group(t, group, &s.id, self.warn) == Some(true))
+                    .filter(|&t| self.member(t, group, o, s))
                     .count() as f64
             }
             Counter::OtherOperatorsInRoom => (self.w.rooms[r].occupants.len() - 1) as f64,
@@ -855,6 +999,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                     skill: s.id.clone(),
                     resource: resource.clone(),
                 });
+                self.counted[o] = true;
                 0.0
             }
             Counter::GoldProductionLines => self
@@ -873,22 +1018,28 @@ impl<'e, 'a> Eval<'e, 'a> {
                 match self.w.config.memberships.skill_types.get(family) {
                     Some(prefixes) => {
                         let kind = self.w.rooms[r].room.kind;
-                        self.w.rooms[r]
+                        let holders: Vec<usize> = self.w.rooms[r]
                             .occupants
                             .iter()
-                            .filter(|&&t| {
+                            .copied()
+                            .filter(|&t| {
                                 self.w.ops[t].skills.iter().any(|sk| {
                                     sk.room_type == kind
                                         && prefixes.iter().any(|p| sk.family() == p)
                                 })
                             })
-                            .count() as f64
+                            .collect();
+                        for &t in &holders {
+                            self.picked(t);
+                        }
+                        holders.len() as f64
                     }
                     None => {
                         self.warn.push(SimWarning::UnknownSkillType {
                             skill: s.id.clone(),
                             family: family.clone(),
                         });
+                        self.counted[o] = true;
                         0.0
                     }
                 }
@@ -914,6 +1065,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                     skill: s.id.clone(),
                     text: text.clone(),
                 });
+                self.counted[o] = true;
                 0.0
             }
         }
@@ -966,6 +1118,7 @@ impl<'e, 'a> Eval<'e, 'a> {
                 self.warn.push(SimWarning::SetAmountUnsupported {
                     skill: s.id.clone(),
                 });
+                self.counted[o] = true;
                 None
             }
         }
@@ -1014,6 +1167,9 @@ impl<'e, 'a> Eval<'e, 'a> {
             };
             let value = rec.value * factor;
             *sums.entry((rec.room, rec.stat)).or_default() += value;
+            if value.abs() > EPS {
+                self.counted[rec.op] = true;
+            }
             contributions.push(Contribution {
                 room: w.rooms[rec.room].room.id.clone(),
                 operator: w.ops[rec.op].id.clone(),
@@ -1022,6 +1178,20 @@ impl<'e, 'a> Eval<'e, 'a> {
                 value,
                 scaled_from: (factor != 1.0).then_some(rec.value),
             });
+        }
+        // A scaler counts when there was something of a coworker's to scale.
+        for sc in &self.scalers {
+            let scales = kept.iter().any(|rec| {
+                rec.room == sc.room
+                    && rec.stat == sc.stat
+                    && rec.op != sc.owner
+                    && w.ops[rec.op].room == rec.room
+                    && !rec.facility_based
+                    && rec.value.abs() > EPS
+            });
+            if scales {
+                self.counted[sc.owner] = true;
+            }
         }
 
         let c = &w.data.constants;
@@ -1085,27 +1255,40 @@ impl<'e, 'a> Eval<'e, 'a> {
 
         // Morale stacking: strongest per (recipient, contributor's room
         // kind, target class).
-        let mut kept_moods: Vec<MoodRec> = Vec::with_capacity(self.moods.len());
-        let mut strongest: BTreeMap<(usize, RoomType, MoodClass), usize> = BTreeMap::new();
-        for rec in std::mem::take(&mut self.moods) {
-            match rec.stacking {
-                Stacking::Additive => kept_moods.push(rec),
-                Stacking::StrongestOfType => {
-                    let key = (rec.recipient, owner_kind(rec.source), rec.class);
-                    if let Some(&i) = strongest.get(&key) {
-                        if rec.value.abs() > kept_moods[i].value.abs() {
-                            kept_moods[i] = rec;
+        let stack = |recs: Vec<MoodRec>| {
+            let mut kept: Vec<MoodRec> = Vec::with_capacity(recs.len());
+            let mut strongest: BTreeMap<(usize, RoomType, MoodClass), usize> = BTreeMap::new();
+            for rec in recs {
+                match rec.stacking {
+                    Stacking::Additive => kept.push(rec),
+                    Stacking::StrongestOfType => {
+                        let key = (rec.recipient, owner_kind(rec.source), rec.class);
+                        if let Some(&i) = strongest.get(&key) {
+                            if rec.value.abs() > kept[i].value.abs() {
+                                kept[i] = rec;
+                            }
+                        } else {
+                            strongest.insert(key, kept.len());
+                            kept.push(rec);
                         }
-                    } else {
-                        strongest.insert(key, kept_moods.len());
-                        kept_moods.push(rec);
                     }
                 }
             }
-        }
+            kept
+        };
+        let kept_moods = stack(std::mem::take(&mut self.moods));
         let mut skill_sum = vec![0.0; n];
         for rec in &kept_moods {
             skill_sum[rec.recipient] += rec.value;
+            if rec.value.abs() > EPS {
+                self.counted[rec.source] = true;
+            }
+            if rec.value > EPS && rec.recipient != rec.source {
+                self.supports[rec.source] = true;
+            }
+        }
+        for rec in stack(std::mem::take(&mut self.probes)) {
+            self.supports[rec.source] = true;
         }
         let mood = (0..n)
             .map(|o| {
@@ -1126,6 +1309,8 @@ impl<'e, 'a> Eval<'e, 'a> {
                     total: base + skills,
                     exhausted: self.exhausted[o],
                     idle,
+                    counted: self.counted[o],
+                    supports: self.supports[o],
                 }
             })
             .collect();

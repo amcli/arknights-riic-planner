@@ -29,11 +29,27 @@ ureq = { version = "3", default-features = false, features = ["native-tls"] }
 sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 axum = "0.8"
+# Postgres only, TLS through native-tls: rustls would pull in ring, which
+# needs a C toolchain (as would SQLite).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-native-tls", "postgres", "macros", "migrate", "uuid", "chrono", "json"] }
+dotenvy = "0.15"
+# Accounts: Argon2id password hashes, session cookies, random tokens.
+argon2 = "0.5"
+cookie = "0.18"
+getrandom = "0.4"
+unicode-normalization = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "set-header"] }
 serde_path_to_error = "0.1"
+# Per-client rate limits. Only std and dashmap: the default features add
+# quanta and rand, which the limits do not need.
+governor = { version = "0.10", default-features = false, features = ["std", "dashmap"] }
+# Trusted proxy addresses and blocks.
+ipnet = "2"
+# Krooster answers kept in memory, one fetch per name at a time.
+moka = { version = "0.12", features = ["future"] }
 # Test-only: drive the router in-process.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

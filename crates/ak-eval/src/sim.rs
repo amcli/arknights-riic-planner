@@ -56,6 +56,13 @@ pub struct OpState {
     pub hours_idle: f64,
     /// Hours off the base.
     pub hours_benched: f64,
+    /// Work rooms they have been stationed in other than idle.
+    pub worked_in: BTreeSet<RoomId>,
+    /// Rooms where they have counted (see [`effects::MoodRate::counted`]).
+    pub counted_in: BTreeSet<RoomId>,
+    /// Rooms where they have supported others (see
+    /// [`effects::MoodRate::supports`]).
+    pub supported_in: BTreeSet<RoomId>,
 }
 
 impl OpState {
@@ -71,6 +78,9 @@ impl OpState {
             hours_exhausted: 0.0,
             hours_idle: 0.0,
             hours_benched: 0.0,
+            worked_in: BTreeSet::new(),
+            counted_in: BTreeSet::new(),
+            supported_in: BTreeSet::new(),
         }
     }
 }
@@ -631,6 +641,15 @@ impl Sim<'_> {
             } else if m.kind == RoomType::Dormitory {
                 st.hours_resting += dt;
             }
+            if !m.idle && m.kind.is_work_area() && !st.worked_in.contains(&m.room) {
+                st.worked_in.insert(m.room.clone());
+            }
+            if m.counted && !st.counted_in.contains(&m.room) {
+                st.counted_in.insert(m.room.clone());
+            }
+            if m.supports && !st.supported_in.contains(&m.room) {
+                st.supported_in.insert(m.room.clone());
+            }
             if !m.idle && m.kind.is_work_area() && before > EPS && after <= EPS {
                 self.events.push(SimEvent {
                     hour: self.hour + dt,
@@ -686,6 +705,35 @@ impl Sim<'_> {
                             st.hours_in_room = 0.0;
                         }
                         self.event(EventKind::Benched { operator, from });
+                    }
+                }
+                SimAction::Swap { a, b } => {
+                    let at = |s: &Self, slot: &Slot| {
+                        s.assignment
+                            .slots(slot.room.as_str())
+                            .and_then(|v| v.get(usize::from(slot.index)).cloned())
+                            .flatten()
+                    };
+                    let (x, y) = (at(self, &a), at(self, &b));
+                    if let Err(e) = self.assignment.swap(&a, &b) {
+                        if let Some(operator) = x.or(y) {
+                            self.warnings.push(SimWarning::RotationRefused {
+                                operator,
+                                reason: e.to_string(),
+                            });
+                        }
+                        continue;
+                    }
+                    for (operator, from, to) in [(x, &a, &b), (y, &b, &a)] {
+                        let Some(operator) = operator else { continue };
+                        if let Some(st) = self.states.get_mut(&operator) {
+                            st.hours_in_room = 0.0;
+                        }
+                        self.event(EventKind::Moved {
+                            operator,
+                            from: Some(from.clone()),
+                            to: to.clone(),
+                        });
                     }
                 }
             }
@@ -756,6 +804,8 @@ impl Sim<'_> {
                 hours_exhausted: st.hours_exhausted,
                 hours_benched: st.hours_benched,
                 hours_idle: st.hours_idle,
+                worked_in: st.worked_in.iter().cloned().collect(),
+                filler_in: st.worked_in.difference(&st.counted_in).cloned().collect(),
             })
             .collect();
         SimResult {

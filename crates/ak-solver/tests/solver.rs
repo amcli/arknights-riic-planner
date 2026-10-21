@@ -51,10 +51,11 @@ fn base(extra: Vec<Room>) -> BaseConfig {
     b
 }
 
-/// Operators whose maxed Factory skills are nothing but unconditional flat
-/// productivity for any product in their own room: `(id, total)`, largest
-/// first, ties by id.
-fn plain_factory_ops(n: usize) -> Vec<(OperatorId, f64)> {
+/// Operators whose maxed skills for `kind` (a Factory or a Trading Post)
+/// are nothing but unconditional flat speed in their own room: productivity
+/// for any product, or order efficiency. `(id, total)`, largest first, ties
+/// by id.
+fn plain_ops(kind: RoomType, n: usize) -> Vec<(OperatorId, f64)> {
     let data = data();
     let mut out = Vec::new();
     for op in data.operators.values() {
@@ -63,7 +64,7 @@ fn plain_factory_ops(n: usize) -> Vec<(OperatorId, f64)> {
         let mut any = false;
         for b in op.max_buffs() {
             let s = &data.skills[b.as_str()];
-            if s.room_type != RoomType::Manufacture {
+            if s.room_type != kind {
                 continue;
             }
             let Some(m) = &s.mechanics else {
@@ -71,7 +72,7 @@ fn plain_factory_ops(n: usize) -> Vec<(OperatorId, f64)> {
                 break;
             };
             for c in &m.clauses {
-                match (&c.when, &c.effect) {
+                let flat = match (&c.when, &c.effect) {
                     (
                         Predicate::Always,
                         Effect::Productivity {
@@ -79,11 +80,22 @@ fn plain_factory_ops(n: usize) -> Vec<(OperatorId, f64)> {
                             product: None,
                             scope: Scope::ThisRoom,
                         },
-                    ) => {
+                    ) if kind == RoomType::Manufacture => Some(*value),
+                    (
+                        Predicate::Always,
+                        Effect::OrderEfficiency {
+                            amount: Amount::Flat { value },
+                            scope: Scope::ThisRoom,
+                        },
+                    ) if kind == RoomType::Trading => Some(*value),
+                    _ => None,
+                };
+                match flat {
+                    Some(value) => {
                         total += value;
                         any = true;
                     }
-                    _ => plain = false,
+                    None => plain = false,
                 }
             }
         }
@@ -173,16 +185,21 @@ fn approx(actual: f64, expected: f64, tol: f64) {
 /// One EXP Factory whose crew is the only thing to decide; the Control
 /// Center and Power Plant slots are locked empty.
 fn crew_problem() -> (SolveRequest, Vec<OperatorId>) {
+    crew_problem_in(Room::new("f1", RoomType::Manufacture, 3).with_formula("1"))
+}
+
+/// `room`'s crew is the only thing to decide; the Control Center and Power
+/// Plant slots are locked empty.
+fn crew_problem_in(room: Room) -> (SolveRequest, Vec<OperatorId>) {
     // Only these three plain operators enter the pool, alongside three with
-    // no Factory skills, so they are the unique optimum whatever ties exist
-    // outside the pool.
-    let plain = plain_factory_ops(3);
+    // no skills for the room, so they are the unique optimum whatever ties
+    // exist outside the pool.
+    let kind = room.kind;
+    let plain = plain_ops(kind, 3);
     assert_eq!(plain.len(), 3, "{plain:?}");
     let best: Vec<OperatorId> = plain.iter().map(|(id, _)| id.clone()).collect();
-    let dull = without_skills_for(RoomType::Manufacture, 3, &best);
-    let b = base(vec![
-        Room::new("f1", RoomType::Manufacture, 3).with_formula("1"),
-    ]);
+    let dull = without_skills_for(kind, 3, &best);
+    let b = base(vec![room]);
     let mut locked: Vec<Slot> = (0..5).map(|i| Slot::new("cc", i)).collect();
     for r in b.rooms_of(RoomType::Power) {
         locked.push(Slot::new(r.id.clone(), 0));
@@ -246,6 +263,53 @@ fn annealing_finds_the_exhaustive_optimum() {
         occupants(&r.candidates[0].assignment, "f1"),
         occupants(&truth.candidates[0].assignment, "f1")
     );
+}
+
+#[test]
+fn depot_gold_is_sold_and_makes_the_trading_crew_count() {
+    // A level-3 Trading Post and no Factory: only the depot's starting
+    // Pure Gold can be sold, at 500 LMD a unit.
+    let solve_with = |gold: f64| {
+        let (mut req, best) = crew_problem_in(Room::new("t1", RoomType::Trading, 3));
+        req.solver.strategy = Strategy::Exhaustive;
+        req.config.initial_gold = gold;
+        let r = solve(data(), &req).unwrap();
+        let mut steady = SteadyState::new(
+            data(),
+            &req.base,
+            &req.roster,
+            &req.config,
+            &req.objective,
+            &req.rotation,
+        );
+        let proxy = steady.score(&r.candidates[0].assignment).unwrap();
+        (r, proxy.breakdown, best)
+    };
+
+    // Nothing to sell, whoever trades.
+    let (r, proxy, _) = solve_with(0.0);
+    assert!(r.candidates.iter().all(|c| c.breakdown.lmd == 0.0));
+    assert_eq!(proxy.lmd, 0.0);
+
+    // Less than any crew sells in a day: all of it goes, whoever trades,
+    // and leaving the depot counts against the gold kept.
+    let (r, proxy, _) = solve_with(5.0);
+    let top = &r.candidates[0].breakdown;
+    approx(top.lmd, 2500.0, 1e-6);
+    approx(top.gold_net, -5.0, 1e-9);
+    approx(proxy.lmd, 2500.0, 1e-6);
+    approx(proxy.gold_net, -5.0, 1e-9);
+
+    // More than any crew sells: the fastest crew wins, in the proxy that
+    // picks the finalists and in the simulation that ranks them.
+    let (r, proxy, best) = solve_with(1000.0);
+    let top = &r.candidates[0];
+    assert_eq!(occupants(&top.assignment, "t1"), best.into_iter().collect());
+    let totals = &r.best_simulation.as_ref().unwrap().totals;
+    assert!(totals.gold_consumed > 5.0, "{}", totals.gold_consumed);
+    approx(totals.gold_in_depot, 1000.0 - totals.gold_consumed, 1e-9);
+    approx(top.breakdown.lmd, totals.gold_consumed * 500.0, 1e-6);
+    assert!(proxy.lmd > 2500.0, "{}", proxy.lmd);
 }
 
 #[test]

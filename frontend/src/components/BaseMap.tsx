@@ -1,10 +1,12 @@
 // The base drawn on the game's own floor plan (`building_data.layouts.v0`):
 // every room in a slot of its category and size, with who is stationed
-// there. With a `baseline`, operators that differ from it are marked.
+// there. With a `baseline`, operators that differ from it are marked. Filler
+// (operators any operator without skills for the room could replace) is
+// shown as such rather than by name.
 
 import type { AssignmentMap, BaseConfig, Facility, LayoutSlot, Room, RoomType } from "../api";
 import { useGameData } from "../data";
-import { itemName, roomName } from "../format";
+import { FILLER, itemName, roomName } from "../format";
 
 /** Slots that never hold a staffable room. */
 const HIDDEN = new Set(["ELEVATOR", "CORRIDOR", "CUSTOM_P"]);
@@ -60,13 +62,24 @@ export function placeRooms(
   return { placed, unplaced };
 }
 
-/** Occupants that differ between two assignments, per room. */
-export function diffRoom(room: string, now?: AssignmentMap, before?: AssignmentMap) {
+/** Who was filler in each of two assignments being compared. */
+export interface Fillers {
+  now?: Set<string>;
+  before?: Set<string>;
+}
+
+/** Occupants that differ between two assignments, per room. One filler swapped for another is no change. */
+export function diffRoom(room: string, now?: AssignmentMap, before?: AssignmentMap, fillers?: Fillers) {
   const a = new Set((now?.[room] ?? []).filter((x): x is string => x !== null));
   const b = new Set((before?.[room] ?? []).filter((x): x is string => x !== null));
+  const added = [...a].filter((x) => !b.has(x));
+  const removed = [...b].filter((x) => !a.has(x));
+  const newFillers = added.filter((x) => fillers?.now?.has(x));
+  const oldFillers = removed.filter((x) => fillers?.before?.has(x));
+  const swapped = new Set([...newFillers.slice(0, oldFillers.length), ...oldFillers.slice(0, newFillers.length)]);
   return {
-    added: [...a].filter((x) => !b.has(x)),
-    removed: [...b].filter((x) => !a.has(x)),
+    added: added.filter((x) => !swapped.has(x)),
+    removed: removed.filter((x) => !swapped.has(x)),
   };
 }
 
@@ -99,12 +112,16 @@ interface Props {
   assignment?: AssignmentMap;
   /** Mark operators that differ from this assignment. */
   baseline?: AssignmentMap;
+  /** Who in `assignment` and `baseline` to show as filler. */
+  fillers?: Fillers;
   /** Accessible name for the drawing. */
   label: string;
 }
 
-export function BaseMap({ base, assignment, baseline, label }: Props) {
+export function BaseMap({ base, assignment, baseline, fillers, label }: Props) {
   const { layout, facilities, formulas, name } = useGameData();
+  const now = (op: string) => (fillers?.now?.has(op) ? FILLER : name(op));
+  const before = (op: string) => (fillers?.before?.has(op) ? FILLER : name(op));
   const visible = layout.slots.filter((s) => !HIDDEN.has(s.category));
   const { placed, unplaced } = placeRooms(base, layout.slots, facilities);
   const maxRow = Math.max(...visible.map((s) => s.offset.row + s.size.rows));
@@ -150,7 +167,7 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
           const ops = assignment?.[room.id] ?? [];
           const filled = ops.filter((o) => o !== null).length;
           const { added, removed } = baseline
-            ? diffRoom(room.id, assignment, baseline)
+            ? diffRoom(room.id, assignment, baseline, fillers)
             : { added: [] as string[], removed: [] as string[] };
           const changed = added.length > 0 || removed.length > 0;
           const extra = detail(room, formulas);
@@ -170,8 +187,8 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
               <title>
                 {[
                   `${title}${extra ? ` · ${extra}` : ""} (${room.id})`,
-                  ...lines.map((l) => name(l.op) + (added.includes(l.op) ? " (new)" : "")),
-                  ...(removed.length ? [`moved out: ${removed.map(name).join(", ")}`] : []),
+                  ...lines.map((l) => now(l.op) + (added.includes(l.op) ? " (new)" : "")),
+                  ...(removed.length ? [`moved out: ${removed.map(before).join(", ")}`] : []),
                 ].join("\n")}
               </title>
               <rect className="body" x={rx} y={ry} width={w} height={h} rx={6} />
@@ -195,11 +212,12 @@ export function BaseMap({ base, assignment, baseline, label }: Props) {
                 const row = n % perColumn;
                 const isNew = added.includes(op);
                 const trainee = room.kind === "TRAINING" && i === 1;
-                const text = `${isNew ? "+ " : ""}${name(op)}${trainee ? " (trainee)" : ""}`;
+                const text = `${isNew ? "+ " : ""}${now(op)}${trainee ? " (trainee)" : ""}`;
+                const filler = fillers?.now?.has(op) ? " op-filler" : "";
                 return (
                   <text
                     key={op}
-                    className={isNew ? "op op-new" : "op"}
+                    className={`op${isNew ? " op-new" : ""}${filler}`}
                     x={left + column * colWidth}
                     y={ry + (extra ? 39 : 30) + row * 12}
                   >

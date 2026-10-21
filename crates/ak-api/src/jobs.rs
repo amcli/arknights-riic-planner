@@ -1,8 +1,9 @@
 //! Background solves.
 //!
 //! A solve is a stored document ([`SolveJob`]) plus, while it is queued or
-//! running, an in-memory entry in [`Jobs`] that holds its live progress and
-//! its stop flag. The document moves through these statuses:
+//! running, an in-memory entry in [`Jobs`] that holds its owner, its live
+//! progress and its stop flag. Every write to the document is its owner's,
+//! and only its owner can stop or delete it. The document moves through these statuses:
 //!
 //! ```text
 //! pending ──▶ running ──▶ done      (result; `result.stopped` if stopped early)
@@ -11,21 +12,27 @@
 //! ```
 //!
 //! At most [`Limits::max_running_solves`](crate::Limits::max_running_solves)
-//! run at once; the rest wait as `pending`. Stopping a running solve ends
+//! run at once; the rest wait as `pending`. One account may have at most
+//! [`Limits::max_solves_per_account`](crate::Limits::max_solves_per_account)
+//! queued or running ([`Jobs::admit`]). Stopping a running solve ends
 //! its search early and keeps what it found. Deleting a solve stops it and
 //! removes the document; nothing is written back afterwards.
 //!
 //! When the server shuts down, running searches are told to stop and their
 //! documents are left as they are, so [`resume`] queues them again on the
 //! next start, from the beginning. A job interrupted [`MAX_ATTEMPTS`] times
-//! is marked failed instead.
+//! is marked failed instead. A job that finishes anyway (it was re-scoring,
+//! or had been stopped by request) is recorded before the server exits:
+//! see [`Jobs::drain`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use ak_solver::{Observer, Progress, SolveRequest, SolveResult, StopReason};
 use ak_store::{Collection, Store, StoreError};
@@ -33,7 +40,6 @@ use ak_store::{Collection, Store, StoreError};
 use crate::AppState;
 use crate::error::ApiError;
 use crate::refs::Refs;
-use crate::stored::blocking;
 
 /// Times a solve may be cut off by the server stopping before it is marked
 /// failed rather than queued again.
@@ -135,12 +141,35 @@ struct LiveState {
 
 /// A queued or running job. The `state` lock is held around every write to
 /// the job's document, so a stop or a delete can never be overwritten by a
-/// stale write from the runner.
+/// stale write from the runner; it is an async lock because it is held
+/// across those writes. `state` changes only once its write has succeeded,
+/// so a failed stop or delete can simply be tried again.
 #[derive(Debug)]
 struct Live {
-    state: Mutex<LiveState>,
+    /// The account the solve belongs to.
+    owner: Uuid,
+    state: tokio::sync::Mutex<LiveState>,
     stop: AtomicBool,
     progress: Mutex<Option<Progress>>,
+    /// Wakes the job's runner if it is stopped or deleted while it waits for
+    /// a slot, so it lets go of its request at once.
+    cancelled: tokio::sync::Notify,
+}
+
+impl Live {
+    /// A job of `owner`'s, waiting for a slot.
+    fn queued(owner: Uuid) -> Self {
+        Live {
+            owner,
+            state: tokio::sync::Mutex::new(LiveState {
+                stage: Stage::Queued,
+                deleted: false,
+            }),
+            stop: AtomicBool::new(false),
+            progress: Mutex::new(None),
+            cancelled: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -170,34 +199,38 @@ pub struct LiveView {
 /// The queue and the live jobs.
 #[derive(Debug)]
 pub struct Jobs {
-    live: Mutex<HashMap<String, Arc<Live>>>,
+    live: Mutex<HashMap<Uuid, Arc<Live>>>,
     permits: Arc<Semaphore>,
     max_running: usize,
     shutting_down: AtomicBool,
+    /// Runners waiting for a slot.
+    waiting: AtomicUsize,
 }
 
 impl Jobs {
     /// A queue running at most `max_running` solves at once.
     pub fn new(max_running: usize) -> Self {
-        let max_running = max_running.max(1);
+        // At least one, and few enough for `drain` to count them in a u32.
+        let max_running = max_running.clamp(1, u32::MAX as usize);
         Jobs {
             live: Mutex::new(HashMap::new()),
             permits: Arc::new(Semaphore::new(max_running)),
             max_running,
             shutting_down: AtomicBool::new(false),
+            waiting: AtomicUsize::new(0),
         }
     }
 
-    fn get(&self, id: &str) -> Option<Arc<Live>> {
-        lock(&self.live).get(id).cloned()
+    fn get(&self, id: Uuid) -> Option<Arc<Live>> {
+        lock(&self.live).get(&id).cloned()
     }
 
-    fn forget(&self, id: &str) {
-        lock(&self.live).remove(id);
+    fn forget(&self, id: Uuid) {
+        lock(&self.live).remove(&id);
     }
 
     /// Live progress of a queued or running job.
-    pub fn watch(&self, id: &str) -> Option<LiveView> {
+    pub fn watch(&self, id: Uuid) -> Option<LiveView> {
         let live = self.get(id)?;
         let progress = lock(&live.progress).clone();
         Some(LiveView {
@@ -206,23 +239,27 @@ impl Jobs {
         })
     }
 
-    /// Stops a job: a queued one is cancelled at once, a running one ends
-    /// its search at the next checkpoint and reports what it found. Does
-    /// file I/O; call it off the async executor.
-    pub fn stop(&self, store: &dyn Store, id: &str) -> Result<Stopped, StoreError> {
-        let Some(live) = self.get(id) else {
+    /// Stops one of `owner`'s jobs: a queued one is cancelled at once, a
+    /// running one ends its search at the next checkpoint and reports what
+    /// it found. Someone else's job is not live, as far as `owner` can tell.
+    /// Run it with [`to_completion`](crate::stored::to_completion), so a
+    /// dropped request cannot leave it half done.
+    pub async fn stop(&self, store: &Store, owner: Uuid, id: Uuid) -> Result<Stopped, StoreError> {
+        let Some(live) = self.get(id).filter(|live| live.owner == owner) else {
             return Ok(Stopped::NotLive);
         };
-        let mut st = lock(&live.state);
+        let mut st = live.state.lock().await;
         match st.stage {
             Stage::Queued => {
-                st.stage = Stage::Cancelled;
                 if !st.deleted {
-                    update(store, id, |job| {
+                    update(store, owner, id, |job| {
                         job.status = JobStatus::Cancelled;
                         job.finished_at = Some(ak_store::now());
-                    })?;
+                    })
+                    .await?;
                 }
+                st.stage = Stage::Cancelled;
+                live.cancelled.notify_one();
                 drop(st);
                 self.forget(id);
                 Ok(Stopped::Cancelled)
@@ -235,23 +272,31 @@ impl Jobs {
         }
     }
 
-    /// Deletes a job's document, stopping the job first if it is queued or
-    /// running. Returns whether there was a document. Does file I/O; call
-    /// it off the async executor.
-    pub fn delete(&self, store: &dyn Store, id: &str) -> Result<bool, StoreError> {
-        let Some(live) = self.get(id) else {
-            return store.delete(Collection::Solves, id);
+    /// Deletes one of `owner`'s job documents, stopping the job first if it
+    /// is queued or running. A running job keeps its place among the
+    /// account's queued and running solves until its search has wound down,
+    /// since it holds a slot until then. Returns whether there was a
+    /// document. Run it
+    /// with [`to_completion`](crate::stored::to_completion), so a dropped
+    /// request cannot leave it half done.
+    pub async fn delete(&self, store: &Store, owner: Uuid, id: Uuid) -> Result<bool, StoreError> {
+        let Some(live) = self.get(id).filter(|live| live.owner == owner) else {
+            return store.delete(owner, Collection::Solves, id).await;
         };
-        let mut st = lock(&live.state);
+        let mut st = live.state.lock().await;
+        let removed = store.delete(owner, Collection::Solves, id).await?;
         st.deleted = true;
-        if st.stage == Stage::Queued {
-            st.stage = Stage::Cancelled;
-        }
         live.stop.store(true, Ordering::SeqCst);
-        let removed = store.delete(Collection::Solves, id);
+        let queued = st.stage == Stage::Queued;
+        if queued {
+            st.stage = Stage::Cancelled;
+            live.cancelled.notify_one();
+        }
         drop(st);
-        self.forget(id);
-        removed
+        if queued {
+            self.forget(id);
+        }
+        Ok(removed)
     }
 
     /// Tells every running search to stop and keeps queued jobs from
@@ -268,6 +313,18 @@ impl Jobs {
         }
     }
 
+    /// After [`shutdown`](Self::shutdown), waits until every runner has
+    /// written its last change to its job, so that a solve that finished
+    /// (or was stopped by request) while the server was stopping is recorded
+    /// before the store closes. Searches end at their next checkpoint; a
+    /// re-scoring phase in progress runs to its end.
+    pub async fn drain(&self) {
+        let all = u32::try_from(self.max_running).unwrap_or(u32::MAX);
+        // Each runner holds its permit until after its last write, and
+        // queued jobs that get one now return it at once.
+        let _ = self.permits.acquire_many(all).await;
+    }
+
     /// True once [`shutdown`](Self::shutdown) has been called.
     pub fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
@@ -278,45 +335,75 @@ impl Jobs {
         lock(&self.live).len()
     }
 
+    /// Takes a place in the queue for `owner`'s new solve `id`, unless they
+    /// already have `max` queued or running. Checking and taking happen
+    /// under one lock, so two solves sent at once cannot both take the last
+    /// place. Follow with [`start`] once the solve is stored, or with
+    /// [`withdraw`](Self::withdraw) if it could not be.
+    pub fn admit(&self, owner: Uuid, id: Uuid, max: NonZeroUsize) -> bool {
+        let mut live = lock(&self.live);
+        if live.values().filter(|job| job.owner == owner).count() >= max.get() {
+            return false;
+        }
+        live.insert(id, Arc::new(Live::queued(owner)));
+        true
+    }
+
+    /// Gives back the place [`admit`](Self::admit) took for `id`.
+    pub fn withdraw(&self, id: Uuid) {
+        self.forget(id);
+    }
+
     /// Solves holding a slot right now, including a deleted one whose
     /// search has not wound down yet.
     pub fn running(&self) -> usize {
         self.max_running - self.permits.available_permits()
     }
+
+    /// Runners waiting for a slot.
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
 }
 
-/// Reads a solve document, changes its job, and writes it back. A missing
-/// document is left missing.
-fn update(store: &dyn Store, id: &str, f: impl FnOnce(&mut SolveJob)) -> Result<(), StoreError> {
-    let Some(mut doc) = store.get(Collection::Solves, id)? else {
+/// Reads one of `owner`'s solve documents, changes its job, and writes it
+/// back. A missing document is left missing.
+async fn update(
+    store: &Store,
+    owner: Uuid,
+    id: Uuid,
+    f: impl FnOnce(&mut SolveJob),
+) -> Result<(), StoreError> {
+    let Some(mut doc) = store.get(owner, Collection::Solves, id).await? else {
         return Ok(());
     };
     let Ok(mut job) = serde_json::from_value::<SolveJob>(doc.body.clone()) else {
-        tracing::error!(id, "stored solve is unreadable; leaving it alone");
+        tracing::error!(%id, "stored solve is unreadable; leaving it alone");
         return Ok(());
     };
     f(&mut job);
     match serde_json::to_value(&job) {
         Ok(body) => doc.body = body,
         Err(e) => {
-            tracing::error!(id, "cannot serialise solve: {e}");
+            tracing::error!(%id, "cannot serialise solve: {e}");
             return Ok(());
         }
     }
     doc.touch();
-    store.put(Collection::Solves, &doc)
+    store.update(Collection::Solves, &doc).await?;
+    Ok(())
 }
 
-/// Writes the runner's copy of a job, unless the document was deleted.
-fn save(state: &AppState, id: &str, live: &Live, job: &SolveJob) {
-    let st = lock(&live.state);
+/// Changes the runner's job document, unless it was deleted.
+async fn record(store: &Store, id: Uuid, live: &Live, f: impl FnOnce(&mut SolveJob)) {
+    let st = live.state.lock().await;
     if st.deleted {
         return;
     }
-    let result = update(&*state.store, id, |stored| *stored = job.clone());
+    let result = update(store, live.owner, id, f).await;
     drop(st);
     if let Err(e) = result {
-        tracing::error!(id, "cannot save solve: {e}");
+        tracing::error!(%id, "cannot save solve: {e}");
     }
 }
 
@@ -337,85 +424,93 @@ impl Observer for LiveObserver<'_> {
     }
 }
 
-/// Queues a stored job; it runs when a slot is free.
-pub fn enqueue(state: &AppState, id: String, job: SolveJob) {
-    let live = Arc::new(Live {
-        state: Mutex::new(LiveState {
-            stage: Stage::Queued,
-            deleted: false,
-        }),
-        stop: AtomicBool::new(false),
-        progress: Mutex::new(None),
-    });
-    lock(&state.jobs.live).insert(id.clone(), live.clone());
+/// Queues one of `owner`'s stored jobs, however many they already have (a
+/// solve left over from before a restart was admitted then); it runs when a
+/// slot is free.
+fn enqueue(state: &AppState, owner: Uuid, id: Uuid, job: SolveJob) {
+    lock(&state.jobs.live).insert(id, Arc::new(Live::queued(owner)));
+    start(state, id, job);
+}
+
+/// Runs a queued job ([`Jobs::admit`], or one picked up by [`resume`]) when
+/// a slot is free.
+pub fn start(state: &AppState, id: Uuid, job: SolveJob) {
+    let Some(live) = state.jobs.get(id) else {
+        return;
+    };
     let state = state.clone();
     tokio::spawn(async move {
-        let Ok(permit) = state.jobs.permits.clone().acquire_owned().await else {
+        state.jobs.waiting.fetch_add(1, Ordering::SeqCst);
+        let permit = tokio::select! {
+            permit = state.jobs.permits.clone().acquire_owned() => permit.ok(),
+            // Stopped or deleted while waiting: it is already forgotten.
+            () = live.cancelled.notified() => None,
+        };
+        state.jobs.waiting.fetch_sub(1, Ordering::SeqCst);
+        let Some(permit) = permit else {
             return;
         };
         {
-            let mut st = lock(&live.state);
+            let mut st = live.state.lock().await;
             if st.stage == Stage::Cancelled || st.deleted || state.jobs.is_shutting_down() {
                 drop(st);
-                state.jobs.forget(&id);
+                state.jobs.forget(id);
                 return;
             }
             st.stage = Stage::Running;
         }
-        let runner = (state.clone(), id.clone(), live.clone());
-        let outcome = tokio::task::spawn_blocking(move || {
-            let (state, id, live) = runner;
-            run(&state, &id, &live, job);
-        })
-        .await;
-        if let Err(e) = outcome {
-            tracing::error!(id, "solve crashed: {e}");
-            let (state, id, live) = (state.clone(), id.clone(), live.clone());
-            let message = format!("the solver crashed: {e}");
-            let _ = tokio::task::spawn_blocking(move || {
-                let st = lock(&live.state);
-                if !st.deleted {
-                    let result = update(&*state.store, &id, |job| {
-                        job.status = JobStatus::Failed;
-                        job.error = Some(message);
-                        job.finished_at = Some(ak_store::now());
-                    });
-                    if let Err(e) = result {
-                        tracing::error!(id, "cannot save solve: {e}");
-                    }
-                }
-            })
-            .await;
-        }
-        state.jobs.forget(&id);
+        run(&state, id, &live, job).await;
+        state.jobs.forget(id);
         drop(permit);
     });
 }
 
-/// Runs one job to the end, recording each status change.
-fn run(state: &AppState, id: &str, live: &Live, mut job: SolveJob) {
+/// Runs one job to the end, recording each status change. The search runs
+/// on a blocking thread; the writes around it do not.
+async fn run(state: &AppState, id: Uuid, live: &Arc<Live>, mut job: SolveJob) {
     job.status = JobStatus::Running;
     job.started_at = Some(ak_store::now());
     job.attempts += 1;
-    save(state, id, live, &job);
-    tracing::info!(id, attempt = job.attempts, "solve started");
+    let started = job.clone();
+    record(&state.store, id, live, |stored| *stored = started).await;
+    tracing::info!(%id, attempt = job.attempts, "solve started");
 
-    let mut observer = LiveObserver {
-        live,
-        jobs: &state.jobs,
+    let (data, jobs, observed) = (state.data.clone(), state.jobs.clone(), live.clone());
+    let searched = tokio::task::spawn_blocking(move || {
+        let mut observer = LiveObserver {
+            live: &observed,
+            jobs: &jobs,
+        };
+        let outcome = ak_solver::solve_with(&data, &job.request, &mut observer);
+        (job, outcome)
+    })
+    .await;
+    let (mut job, outcome) = match searched {
+        Ok(searched) => searched,
+        Err(e) => {
+            tracing::error!(%id, "solve crashed: {e}");
+            let message = format!("the solver crashed: {e}");
+            record(&state.store, id, live, |job| {
+                job.status = JobStatus::Failed;
+                job.error = Some(message);
+                job.finished_at = Some(ak_store::now());
+            })
+            .await;
+            return;
+        }
     };
-    match ak_solver::solve_with(&state.data, &job.request, &mut observer) {
+    match outcome {
         Ok(result) => {
             let by_shutdown =
                 result.stopped == Some(StopReason::Requested) && !live.stop.load(Ordering::SeqCst);
             if by_shutdown {
                 // Leave the document `running`; the next start queues it
                 // again.
-                tracing::info!(id, "solve interrupted by shutdown");
+                tracing::info!(%id, "solve interrupted by shutdown");
                 return;
             }
             tracing::info!(
-                id,
+                %id,
                 elapsed_ms = result.elapsed_ms,
                 evaluations = result.evaluations,
                 stopped = ?result.stopped,
@@ -425,59 +520,53 @@ fn run(state: &AppState, id: &str, live: &Live, mut job: SolveJob) {
             job.result = Some(result);
         }
         Err(e) => {
-            tracing::warn!(id, "solve failed: {e}");
+            tracing::warn!(%id, "solve failed: {e}");
             job.status = JobStatus::Failed;
             job.error = Some(e.to_string());
         }
     }
     job.finished_at = Some(ak_store::now());
-    save(state, id, live, &job);
+    record(&state.store, id, live, |stored| *stored = job).await;
 }
 
 /// Queues again every solve the store holds as `pending` or `running`: the
 /// server stopped before they finished. Returns how many were queued.
 pub async fn resume(state: &AppState) -> Result<usize, ApiError> {
-    let store = state.store.clone();
-    let queued = blocking(move || -> Result<Vec<(String, SolveJob)>, StoreError> {
-        let mut queued = Vec::new();
-        // Oldest first, so they run in the order they were submitted.
-        let mut metas = store.list(Collection::Solves)?;
-        metas.reverse();
-        for meta in metas {
-            let Some(doc) = store.get(Collection::Solves, &meta.id)? else {
-                continue;
-            };
-            let Ok(job) = serde_json::from_value::<SolveJob>(doc.body) else {
-                tracing::warn!(id = meta.id, "stored solve is unreadable; skipping it");
-                continue;
-            };
-            if job.status.is_finished() {
-                continue;
-            }
-            if job.attempts >= MAX_ATTEMPTS {
-                let attempts = job.attempts;
-                update(&*store, &meta.id, |job| {
-                    job.status = JobStatus::Failed;
-                    job.error = Some(format!(
-                        "the server stopped during each of {attempts} attempts; giving up"
-                    ));
-                    job.finished_at = Some(ak_store::now());
-                })?;
-                continue;
-            }
-            let mut again = job;
-            again.status = JobStatus::Pending;
-            again.started_at = None;
-            let copy = again.clone();
-            update(&*store, &meta.id, |job| *job = copy)?;
-            queued.push((meta.id, again));
+    let store = &state.store;
+    let mut queued = Vec::new();
+    // Everyone's, oldest first, so they run in the order they were
+    // submitted.
+    for doc in store.all_documents(Collection::Solves).await? {
+        let (owner, id) = (doc.owner, doc.id);
+        let Ok(job) = serde_json::from_value::<SolveJob>(doc.body) else {
+            tracing::warn!(%id, "stored solve is unreadable; skipping it");
+            continue;
+        };
+        if job.status.is_finished() {
+            continue;
         }
-        Ok(queued)
-    })
-    .await??;
+        if job.attempts >= MAX_ATTEMPTS {
+            let attempts = job.attempts;
+            update(store, owner, id, |job| {
+                job.status = JobStatus::Failed;
+                job.error = Some(format!(
+                    "the server stopped during each of {attempts} attempts; giving up"
+                ));
+                job.finished_at = Some(ak_store::now());
+            })
+            .await?;
+            continue;
+        }
+        let mut again = job;
+        again.status = JobStatus::Pending;
+        again.started_at = None;
+        let copy = again.clone();
+        update(store, owner, id, |job| *job = copy).await?;
+        queued.push((owner, id, again));
+    }
     let n = queued.len();
-    for (id, job) in queued {
-        enqueue(state, id, job);
+    for (owner, id, job) in queued {
+        enqueue(state, owner, id, job);
     }
     Ok(n)
 }

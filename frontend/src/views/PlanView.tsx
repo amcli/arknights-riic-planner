@@ -26,7 +26,12 @@ const WEIGHTS: Weight[] = [
   { key: "drones", label: "Drones", help: "three minutes of Factory time each", value: 20 },
   { key: "contacts", label: "Office contacts", help: "no LMD price; give one to value them", value: 0 },
   { key: "training_hours", label: "Training hours", help: "base hours of specialization progress", value: 0 },
-  { key: "gold", label: "Unsold Pure Gold", help: "gold made but not sold within the horizon", value: 0 },
+  {
+    key: "gold",
+    label: "Unsold Pure Gold",
+    help: "gold made but not sold; each gold sold, depot gold too, costs this, so at 500 (its LMD) selling stops paying",
+    value: 0,
+  },
   { key: "exhausted_hour", label: "Exhausted hours (penalty)", help: "subtracted per operator-hour at zero morale", value: 0 },
 ];
 
@@ -42,6 +47,17 @@ const HORIZONS = [
   { hours: 72, label: "72 hours" },
   { hours: 168, label: "1 week" },
 ];
+
+// A level-3 Trading Post sells about 144 Pure Gold a week at 100% order
+// efficiency, so the depot slider covers a week of three posts at over 200%;
+// the number beside it takes any amount.
+const GOLD_SLIDER_MAX = 1000;
+
+/** A typed depot amount in whole units; anything unusable is none. */
+const units = (value: number) => (Number.isFinite(value) && value > 0 ? Math.floor(value) : 0);
+
+/** The depot field's text for an amount: empty, showing the placeholder, for none. */
+const unitsText = (value: number) => (value > 0 ? String(value) : "");
 
 interface Pin {
   operator: string;
@@ -87,7 +103,10 @@ export function PlanView() {
   const [swapOut, setSwapOut] = useState(4);
   const [swapIn, setSwapIn] = useState(20);
   const [collectEvery, setCollectEvery] = useState(12);
-  const [initialGold, setInitialGold] = useState(0);
+  // The depot field keeps what was typed, so a partial edit is not rewritten
+  // under the caret; the amount is read from it.
+  const [goldText, setGoldText] = useState("");
+  const depotGold = units(Number(goldText));
   const [weights, setWeights] = useState<Record<string, number>>(() =>
     Object.fromEntries(WEIGHTS.map((w) => [w.key, w.value])),
   );
@@ -143,7 +162,7 @@ export function PlanView() {
         config: {
           horizon_hours: horizon,
           tick_minutes: 5,
-          initial_gold: initialGold,
+          initial_gold: depotGold,
           collection: collectEvery > 0 ? { kind: "every_hours", hours: collectEvery } : { kind: "continuous" },
         },
         rotation: rotate ? { kind: "mood_threshold", swap_out: swapOut, swap_in: swapIn } : { kind: "none" },
@@ -216,6 +235,49 @@ export function PlanView() {
                   {fmt(Object.keys(roster).length)} operators to choose from
                 </p>
               )}
+              <div className="field">
+                <label className="field-label" htmlFor="depot-gold">
+                  Pure Gold in your depot
+                </label>
+                <div className="slider-field">
+                  <input
+                    type="range"
+                    min={0}
+                    max={GOLD_SLIDER_MAX}
+                    step={10}
+                    value={Math.min(depotGold, GOLD_SLIDER_MAX)}
+                    aria-label="Pure Gold in your depot"
+                    aria-valuetext={fmt(depotGold)}
+                    onChange={(e) => setGoldText(unitsText(units(Number(e.target.value))))}
+                  />
+                  <input
+                    id="depot-gold"
+                    type="number"
+                    min={0}
+                    step={1}
+                    placeholder="0"
+                    value={goldText}
+                    onChange={(e) => setGoldText(e.target.value)}
+                    onBlur={() => setGoldText(unitsText(depotGold))}
+                  />
+                </div>
+                {depotGold === 0 ? (
+                  <p className="muted small">
+                    With none, the Trading Posts sell only what the Factories make, so LMD stops at their output.
+                  </p>
+                ) : (
+                  <p className="muted small">
+                    The Trading Posts sell from it once they can sell more than the Factories make.
+                    {(weights.gold ?? 0) === 0 && (
+                      <>
+                        {" "}
+                        Factory gold left unsold then counts only through Unsold Pure Gold (now 0), so the solver may
+                        stop staffing gold Factories.
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
             </div>
           </section>
 
@@ -256,16 +318,10 @@ export function PlanView() {
                   solver treats morale relief as worthless.
                 </p>
               )}
-              <div className="grid-2">
-                <label className="field">
-                  <span className="field-label">Collect every (hours, 0 = continuously)</span>
-                  <input type="number" min={0} value={collectEvery} onChange={(e) => setCollectEvery(Number(e.target.value))} />
-                </label>
-                <label className="field">
-                  <span className="field-label">Pure Gold in the depot at the start</span>
-                  <input type="number" min={0} value={initialGold} onChange={(e) => setInitialGold(Number(e.target.value))} />
-                </label>
-              </div>
+              <label className="field">
+                <span className="field-label">Collect every (hours, 0 = continuously)</span>
+                <input type="number" min={0} value={collectEvery} onChange={(e) => setCollectEvery(Number(e.target.value))} />
+              </label>
             </div>
           </section>
         </div>

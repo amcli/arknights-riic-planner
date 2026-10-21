@@ -1,6 +1,6 @@
 [package]
 name = "ak-store"
-description = "Persistence: versioned JSON documents for rosters, bases and solves, file-backed today — Layer 6"
+description = "Persistence: versioned JSON documents for rosters, bases and solves, and accounts, kept in Postgres — Layer 6"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 uuid = { workspace = true }
 
 [lints]

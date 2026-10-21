@@ -2,12 +2,12 @@
 // they start in. One series per chart, so no legend: the row names it. The
 // compact view packs the groups into columns with each operator's lowest
 // morale; the table view is the full non-hover twin (lowest morale, hours
-// working, resting, exhausted).
+// working, resting, exhausted). Filler is shown as such rather than by name.
 
 import { useState } from "react";
 import type { AssignmentMap, BaseConfig, SimResult } from "../api";
 import { useGameData } from "../data";
-import { fmt, roomName } from "../format";
+import { FILLER, fillerEverywhere, fmt, roomName } from "../format";
 
 const PAD = 4;
 
@@ -108,6 +108,13 @@ export function MoraleTable({
   }
   for (const list of byOp.values()) list.sort((a, b) => a.hour - b.hour);
   const reports = new Map(sim.operators.map((o) => [o.id, o]));
+  // In a room's group, filler there, as on the floor plan; the relief group
+  // has no room, so filler wherever they worked.
+  const label = (op: string, room?: string) => {
+    const r = reports.get(op);
+    const filler = r && (room === undefined ? fillerEverywhere(r) : r.filler_in.includes(room));
+    return filler ? FILLER : name(op);
+  };
 
   const groups: { key: string; title: string; id?: string; ops: string[] }[] = [];
   const seen = new Set<string>();
@@ -136,9 +143,9 @@ export function MoraleTable({
     </details>
   );
 
-  const describe = (op: string, samples: Sample[]) => {
+  const describe = (op: string, samples: Sample[], room?: string) => {
     const r = reports.get(op);
-    return `${name(op)}: morale from ${fmt(samples[0]?.mood ?? 0, 1)} to ${fmt(samples.at(-1)?.mood ?? 0, 1)}, lowest ${fmt(r?.min_mood ?? 0, 1)}`;
+    return `${label(op, room)}: morale from ${fmt(samples[0]?.mood ?? 0, 1)} to ${fmt(samples.at(-1)?.mood ?? 0, 1)}, lowest ${fmt(r?.min_mood ?? 0, 1)}`;
   };
 
   if (view === "chart") {
@@ -163,8 +170,8 @@ export function MoraleTable({
                 const exhausted = r?.hours_exhausted ?? 0;
                 return (
                   <div key={op} className={rowClass}>
-                    <span className="morale-name" title={name(op)}>
-                      {name(op)}
+                    <span className="morale-name" title={label(op, g.id)}>
+                      {label(op, g.id)}
                     </span>
                     {samples.length > 1 ? (
                       <Sparkline
@@ -173,7 +180,7 @@ export function MoraleTable({
                         max={24}
                         width={104}
                         height={22}
-                        label={describe(op, samples)}
+                        label={describe(op, samples, g.id)}
                       />
                     ) : (
                       <span className="muted tiny">idle</span>
@@ -226,7 +233,7 @@ export function MoraleTable({
               const exhausted = (r?.hours_exhausted ?? 0) > 0;
               return (
                 <tr key={op}>
-                  <td>{name(op)}</td>
+                  <td>{label(op, g.id)}</td>
                   <td>
                     {samples.length > 1 ? (
                       <Sparkline
@@ -235,7 +242,7 @@ export function MoraleTable({
                         max={24}
                         width={200}
                         height={26}
-                        label={describe(op, samples)}
+                        label={describe(op, samples, g.id)}
                       />
                     ) : (
                       <span className="muted small">idle</span>

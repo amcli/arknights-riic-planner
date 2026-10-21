@@ -1,5 +1,6 @@
 //! Synchronous Layer 4 endpoints: evaluate one instant, or simulate a
-//! horizon.
+//! horizon. Each takes one of the account's simulation slots
+//! ([`crate::throttle::InFlight`]) and holds it until the computation ends.
 
 use axum::Json;
 use axum::extract::State;
@@ -8,6 +9,7 @@ use serde_json::Value;
 
 use ak_eval::{SimConfig, SimRequest};
 
+use crate::auth::CurrentUser;
 use crate::error::{ApiError, Body};
 use crate::stored::blocking;
 use crate::{AppState, Limits, refs};
@@ -29,11 +31,14 @@ pub fn check_ticks(config: &SimConfig, limits: &Limits) -> Result<(), ApiError> 
 /// instant. `base_id` and `roster_id` may stand in for `base` and `roster`.
 pub async fn evaluate(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Body(body): Body<Value>,
 ) -> Result<Response, ApiError> {
-    let (req, _) = refs::resolve::<SimRequest>(&s, body).await?;
+    let (req, _) = refs::resolve::<SimRequest>(&s, user.id, body).await?;
+    let slot = s.simulations.take(user.id)?;
     let data = s.data.clone();
     let snapshot = blocking(move || {
+        let _slot = slot;
         ak_eval::evaluate(&data, &req.base, &req.assignment, &req.roster, &req.config)
     })
     .await?
@@ -46,13 +51,18 @@ pub async fn evaluate(
 /// `roster`.
 pub async fn simulate(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Body(body): Body<Value>,
 ) -> Result<Response, ApiError> {
-    let (req, _) = refs::resolve::<SimRequest>(&s, body).await?;
+    let (req, _) = refs::resolve::<SimRequest>(&s, user.id, body).await?;
     check_ticks(&req.config, &s.limits)?;
+    let slot = s.simulations.take(user.id)?;
     let data = s.data.clone();
-    let result = blocking(move || ak_eval::simulate(&data, &req))
-        .await?
-        .map_err(ApiError::bad_request)?;
+    let result = blocking(move || {
+        let _slot = slot;
+        ak_eval::simulate(&data, &req)
+    })
+    .await?
+    .map_err(ApiError::bad_request)?;
     Ok(Json(result).into_response())
 }

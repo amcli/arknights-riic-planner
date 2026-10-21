@@ -1,10 +1,11 @@
 // Game data: where the numbers come from, every operator, and the raw
-// request panels for developers.
+// request panels for developers (signed in only: they run on an account).
 
 import { useState } from "react";
 import type { GameDataVersion, OperatorSummary } from "../api";
+import { useAuth } from "../auth";
 import { IconCode, IconSearch } from "../components/icons";
-import { Empty, Meter, PageHeader } from "../components/ui";
+import { Callout, Empty, Meter, PageHeader } from "../components/ui";
 import { useGameData } from "../data";
 import { Simulator } from "../dev/Simulator";
 import { Solver } from "../dev/Solver";
@@ -127,6 +128,7 @@ export function DataView() {
   const data = useGameData();
   const ops = [...data.operators.values()];
   const names = new Map(ops.map((o) => [o.id, o.name]));
+  const signedIn = useAuth().state.status === "signed-in";
   return (
     <>
       <PageHeader title="Game data" description="Where the numbers come from, and every operator the planner knows." />
@@ -139,12 +141,18 @@ export function DataView() {
           <summary>
             <IconCode size={15} /> Developer tools: raw simulate and solve requests
           </summary>
-          <div className="card-body stack">
-            <h3 className="section-label">Simulator</h3>
-            <Simulator names={names} />
-            <h3 className="section-label">Solver</h3>
-            <Solver names={names} />
-          </div>
+          {signedIn ? (
+            <div className="card-body stack">
+              <h3 className="section-label">Simulator</h3>
+              <Simulator names={names} />
+              <h3 className="section-label">Solver</h3>
+              <Solver names={names} />
+            </div>
+          ) : (
+            <div className="card-body">
+              <Callout title="Sign in to send requests">They run, and solves are kept, on your account.</Callout>
+            </div>
+          )}
         </details>
       </div>
     </>

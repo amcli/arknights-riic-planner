@@ -222,6 +222,16 @@ pub struct OperatorReport {
     /// Hours stationed but idle (a Training Room trainee, or an assistant
     /// with no training running).
     pub hours_idle: f64,
+    /// Work rooms they worked in (stationed, not idle). Empty in results
+    /// stored before this was tracked.
+    #[serde(default)]
+    pub worked_in: Vec<RoomId>,
+    /// Those of `worked_in` where they were filler: none of their skills
+    /// took effect there and no other skill picked them out by who they are
+    /// (see [`crate::MoodRate::counted`]), so any operator without skills
+    /// for the room would have done the same there.
+    #[serde(default)]
+    pub filler_in: Vec<RoomId>,
 }
 
 /// The result of one run.

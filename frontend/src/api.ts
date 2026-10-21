@@ -1,6 +1,8 @@
 // Typed client for the ak-api endpoints. Types mirror the serde output of
 // the Rust domain structs; keep them in sync by hand until an OpenAPI/TS
 // generator is wired in. Every error body is `{ "error": message }`.
+// Requests go same-origin, so the browser sends the session cookie itself;
+// the page never sees it.
 
 export type RoomType =
   | "CONTROL"
@@ -215,6 +217,10 @@ export interface OperatorReport {
   hours_exhausted: number;
   hours_benched: number;
   hours_idle: number;
+  /** Work rooms they worked in (stationed, not idle). */
+  worked_in: string[];
+  /** Those of `worked_in` where any operator without skills there would have done the same. */
+  filler_in: string[];
 }
 
 export interface SimEvent {
@@ -271,6 +277,16 @@ export interface MoodRate {
   total: number;
   exhausted: boolean;
   idle: boolean;
+  /**
+   * A skill of theirs took effect, the model could not tell what one does, another skill picked them out by who they
+   * are, or they work in the Reception Room.
+   */
+  counted: boolean;
+  /**
+   * Their being here does something for another operator: a skill of theirs raises, or would raise, another's morale
+   * (Dormitory support), or another operator's skill needs them in this room.
+   */
+  supports: boolean;
 }
 
 export interface Contribution {
@@ -337,7 +353,7 @@ export interface StoredSolveRequest {
   roster: Roster;
   initial?: AssignmentMap | null;
   locked?: Slot[];
-  config: { horizon_hours: number; tick_minutes: number } & Record<string, unknown>;
+  config: { horizon_hours: number; tick_minutes: number; initial_gold: number } & Record<string, unknown>;
   rotation: { kind: "none" } | { kind: "mood_threshold"; swap_out: number; swap_in: number; bench?: string[] };
   objective: Record<string, number>;
   solver: Record<string, unknown>;
@@ -354,6 +370,16 @@ export interface SolveProgress {
   initial_score: number;
   best_score: number;
   elapsed_ms: number;
+}
+
+// ---- accounts --------------------------------------------------------------
+
+/** An account, as its owner sees it. */
+export interface Account {
+  id: string;
+  username: string;
+  email: string | null;
+  created_at: string;
 }
 
 // ---- Layer 6: stored documents ---------------------------------------------
@@ -425,23 +451,37 @@ export interface SolveJob extends DocumentMeta {
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
-    message: string,
+    /** The server's explanation, without the status. */
+    public readonly detail: string,
   ) {
-    super(message);
+    super(`${status} ${detail}`);
     this.name = "ApiError";
   }
 }
 
+const signedOutListeners = new Set<() => void>();
+
+/**
+ * Calls `listener` whenever the server answers that a request is not signed
+ * in (a session that ended or expired). Returns the unsubscribe.
+ */
+export function onSignedOut(listener: () => void): () => void {
+  signedOutListeners.add(listener);
+  return () => signedOutListeners.delete(listener);
+}
+
 async function parse<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    let detail = res.statusText;
+    // HTTP/2 has no status text, so a proxy's error page leaves only the code.
+    let detail = res.statusText || `HTTP ${res.status}`;
     try {
       const body = (await res.json()) as { error?: string };
       if (body.error) detail = body.error;
     } catch {
       // non-JSON error body; keep statusText
     }
-    throw new ApiError(res.status, `${res.status} ${detail}`);
+    if (res.status === 401) signedOutListeners.forEach((listener) => listener());
+    throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -466,6 +506,15 @@ async function deleteJson(path: string): Promise<void> {
 }
 
 export const api = {
+  auth: {
+    /** The account signed in; a `401` when there is none. */
+    me: () => getJson<Account>("/api/v1/auth/me"),
+    register: (username: string, password: string, email?: string) =>
+      sendJson<Account>("POST", "/api/v1/auth/register", { username, password, email }),
+    login: (username: string, password: string) =>
+      sendJson<Account>("POST", "/api/v1/auth/login", { username, password }),
+    logout: () => sendJson<void>("POST", "/api/v1/auth/logout", {}),
+  },
   version: () => getJson<GameDataVersion>("/api/v1/gamedata/version"),
   operators: () => getJson<OperatorSummary[]>("/api/v1/gamedata/operators"),
   facilities: () => getJson<Facility[]>("/api/v1/gamedata/facilities"),
@@ -503,10 +552,17 @@ export const api = {
   krooster: {
     /**
      * The roster in a Krooster user's public profile, `{ data: { roster } }`,
-     * fetched by the server (Krooster sends no CORS headers). Store it as a
-     * `krooster` roster.
+     * fetched by the server (Krooster sends no CORS headers), and its age in
+     * seconds: the server reuses a fetched roster for a few minutes. Store it
+     * as a `krooster` roster.
      */
-    roster: (username: string) => getJson<unknown>(`/api/v1/import/krooster/${encodeURIComponent(username)}`),
+    roster: async (username: string) => {
+      const res = await fetch(`/api/v1/import/krooster/${encodeURIComponent(username)}`, {
+        headers: { Accept: "application/json" },
+      });
+      const roster = await parse<unknown>(res);
+      return { roster, age: Number(res.headers.get("Age") ?? 0) };
+    },
   },
   bases: {
     create: (base: BaseConfig, name?: string) => sendJson<DocumentMeta>("POST", "/api/v1/bases", { name, base }),

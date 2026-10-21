@@ -312,6 +312,30 @@ code,
   gap: 4px;
 }
 
+.account-name {
+  max-width: 160px;
+  overflow: hidden;
+  padding: 0 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-error {
+  color: var(--error);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* The sign-in card stands alone in the page. */
+.auth-card {
+  max-width: 420px;
+  margin: 24px auto 0;
+}
+
 /* ---- page ---------------------------------------------------------------- */
 
 main.page {
@@ -632,6 +656,8 @@ details.card[open] > summary {
 input[type="text"],
 input[type="search"],
 input[type="number"],
+input[type="password"],
+input[type="email"],
 select,
 textarea {
   min-width: 0;
@@ -718,6 +744,30 @@ input[type="number"] {
 .field input,
 .field select {
   width: 100%;
+}
+
+input[type="range"] {
+  height: 30px;
+  margin: 0;
+  border-radius: var(--radius-sm);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+input[type="range"]:focus {
+  box-shadow: none;
+}
+
+input[type="range"]:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+/* A slider with the exact number beside it. */
+.slider-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: center;
+  gap: 12px;
 }
 
 .inline {
@@ -2422,6 +2472,10 @@ table.morale tr.group th {
   font-weight: 700;
 }
 
+.base-map .op-filler {
+  fill: var(--muted);
+}
+
 /* ---- game data ------------------------------------------------------------------------ */
 
 dl.facts {
@@ -2563,7 +2617,8 @@ dl.facts dd {
 }
 
 @media (max-width: 560px) {
-  .nav a span {
+  .nav a span,
+  .account-name {
     display: none;
   }
 }

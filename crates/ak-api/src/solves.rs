@@ -7,16 +7,18 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use ak_domain::{Assignment, GameData};
 use ak_solver::{Progress, SolveRequest, Space};
-use ak_store::{Collection, Document, DocumentMeta, StoreError};
+use ak_store::{Collection, Document, DocumentMeta};
 
+use crate::auth::CurrentUser;
 use crate::error::{ApiError, Body};
 use crate::jobs::{self, JobStatus, SolveJob, Stopped};
 use crate::rosters::check_roster;
 use crate::simulation::check_ticks;
-use crate::stored::{self, Stored, blocking};
+use crate::stored::{self, Stored, blocking, to_completion};
 use crate::{AppState, Limits, refs};
 
 /// `POST` body: an optional name and the request. The request may name a
@@ -83,22 +85,38 @@ fn check_solve(data: &GameData, req: &SolveRequest) -> Result<(), ApiError> {
 }
 
 /// `POST /api/v1/solves`: validates, stores the job as `pending`, answers
-/// `202`, and queues it.
+/// `202`, and queues it, or answers `429` if the account already has as
+/// many solves queued or running as it may. Storing and queueing finish
+/// together even if the client goes away, so no stored job is left
+/// unqueued.
 pub async fn create(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Body(body): Body<SolveBody>,
 ) -> Result<Response, ApiError> {
-    let (mut request, refs) = refs::resolve::<SolveRequest>(&s, body.request).await?;
+    let (mut request, refs) = refs::resolve::<SolveRequest>(&s, user.id, body.request).await?;
     apply_limits(&s.limits, &mut request)?;
     check_solve(&s.data, &request)?;
     let job = SolveJob::new(request, refs);
     let value = serde_json::to_value(&job).map_err(ApiError::internal)?;
-    let doc = Document::new(body.name, value);
+    let doc = Document::new(user.id, body.name, value);
     let meta = doc.meta();
-    let id = doc.id.clone();
-    let store = s.store.clone();
-    blocking(move || store.put(Collection::Solves, &doc)).await??;
-    jobs::enqueue(&s, id, job);
+    let max = s.limits.max_solves_per_account;
+    if !s.jobs.admit(doc.owner, doc.id, max) {
+        return Err(ApiError::too_many_requests(format!(
+            "you already have {max} solves queued or running; stop one or wait for one to finish"
+        )));
+    }
+    let state = s.clone();
+    to_completion(async move {
+        if let Err(e) = state.store.insert(Collection::Solves, &doc).await {
+            state.jobs.withdraw(doc.id);
+            return Err(ApiError::from(e));
+        }
+        jobs::start(&state, doc.id, job);
+        Ok(())
+    })
+    .await??;
     let summary = SolveSummary {
         meta,
         status: JobStatus::Pending,
@@ -106,31 +124,38 @@ pub async fn create(
     Ok((StatusCode::ACCEPTED, Json(summary)).into_response())
 }
 
-/// `GET /api/v1/solves`: every job with its status, newest first.
-pub async fn list(State(s): State<AppState>) -> Result<Response, ApiError> {
-    let store = s.store.clone();
-    let summaries = blocking(move || -> Result<Vec<SolveSummary>, StoreError> {
-        let mut out = Vec::new();
-        for meta in store.list(Collection::Solves)? {
-            let status = store
-                .get(Collection::Solves, &meta.id)?
-                .and_then(|doc| serde_json::from_value(doc.body.get("status")?.clone()).ok())
+/// `GET /api/v1/solves`: the account's jobs with their status, newest first.
+pub async fn list(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> Result<Response, ApiError> {
+    let summaries: Vec<SolveSummary> = s
+        .store
+        .documents(user.id, Collection::Solves)
+        .await?
+        .into_iter()
+        .map(|doc| {
+            let status = doc
+                .body
+                .get("status")
+                .and_then(|status| serde_json::from_value(status.clone()).ok())
                 .unwrap_or(JobStatus::Failed);
-            out.push(SolveSummary { meta, status });
-        }
-        Ok(out)
-    })
-    .await??;
+            SolveSummary {
+                meta: doc.meta(),
+                status,
+            }
+        })
+        .collect();
     Ok(Json(summaries).into_response())
 }
 
-async fn current(s: &AppState, id: String) -> Result<SolveView, ApiError> {
-    let doc = stored::fetch(s, Collection::Solves, id.clone()).await?;
+async fn current(s: &AppState, owner: Uuid, id: String) -> Result<SolveView, ApiError> {
+    let doc = stored::fetch(s, owner, Collection::Solves, id.clone()).await?;
     let Stored { meta, body: job } = stored::view::<SolveJob>(doc)?;
     let live = if job.status.is_finished() {
         None
     } else {
-        s.jobs.watch(&id)
+        s.jobs.watch(meta.id)
     };
     let live = live.unwrap_or_default();
     Ok(SolveView {
@@ -143,39 +168,49 @@ async fn current(s: &AppState, id: String) -> Result<SolveView, ApiError> {
 
 /// `GET /api/v1/solves/{id}`: status, request, progress while running,
 /// and the result or error once finished.
-pub async fn get(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    Ok(Json(current(&s, id).await?).into_response())
+pub async fn get(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    Ok(Json(current(&s, user.id, id).await?).into_response())
 }
 
 /// `POST /api/v1/solves/{id}/stop`: a pending solve is cancelled (`200`);
 /// a running one ends its search at the next checkpoint and finishes
 /// `done` with the best found so far (`202`); a finished one is a `409`.
-pub async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    let (jobs, store, key) = (s.jobs.clone(), s.store.clone(), id.clone());
-    let outcome = blocking(move || jobs.stop(&*store, &key)).await??;
+pub async fn stop(
+    State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let key = stored::parse_id(&id)?;
+    let (jobs, store, owner) = (s.jobs.clone(), s.store.clone(), user.id);
+    let outcome = to_completion(async move { jobs.stop(&store, owner, key).await }).await??;
     let status = match outcome {
         Stopped::Cancelled => StatusCode::OK,
         Stopped::Stopping => StatusCode::ACCEPTED,
         Stopped::NotLive => {
-            let view = current(&s, id.clone()).await?;
+            let view = current(&s, user.id, id.clone()).await?;
             return Err(ApiError::conflict(format!(
                 "solve {id} is {}; only a pending or running solve can be stopped",
                 view.job.status.as_str()
             )));
         }
     };
-    Ok((status, Json(current(&s, id).await?)).into_response())
+    Ok((status, Json(current(&s, user.id, id).await?)).into_response())
 }
 
 /// `GET /api/v1/solves/{id}/candidates/{n}/simulation`: the full
 /// simulation of finalist `n` (0 is the best), run the way the solve scored
 /// it. The best one's comes from the result; the others are simulated on
-/// request.
+/// request, in one of the account's simulation slots.
 pub async fn candidate_simulation(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path((id, n)): Path<(String, usize)>,
 ) -> Result<Response, ApiError> {
-    let doc = stored::fetch(&s, Collection::Solves, id.clone()).await?;
+    let doc = stored::fetch(&s, user.id, Collection::Solves, id.clone()).await?;
     let Stored { body: job, .. } = stored::view::<SolveJob>(doc)?;
     let Some(result) = job.result else {
         return Err(ApiError::conflict(format!(
@@ -194,10 +229,14 @@ pub async fn candidate_simulation(
     {
         return Ok(Json(best).into_response());
     }
+    let slot = s.simulations.take(user.id)?;
     let (data, request, assignment) = (s.data.clone(), job.request, candidate.assignment.clone());
-    let sim = blocking(move || ak_solver::simulate_candidate(&data, &request, &assignment))
-        .await?
-        .map_err(ApiError::bad_request)?;
+    let sim = blocking(move || {
+        let _slot = slot;
+        ak_solver::simulate_candidate(&data, &request, &assignment)
+    })
+    .await?
+    .map_err(ApiError::bad_request)?;
     Ok(Json(sim).into_response())
 }
 
@@ -205,10 +244,12 @@ pub async fn candidate_simulation(
 /// running, and removes it.
 pub async fn delete(
     State(s): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let (jobs, store, key) = (s.jobs.clone(), s.store.clone(), id.clone());
-    let removed = blocking(move || jobs.delete(&*store, &key)).await??;
+    let key = stored::parse_id(&id)?;
+    let (jobs, store, owner) = (s.jobs.clone(), s.store.clone(), user.id);
+    let removed = to_completion(async move { jobs.delete(&store, owner, key).await }).await??;
     if removed {
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {

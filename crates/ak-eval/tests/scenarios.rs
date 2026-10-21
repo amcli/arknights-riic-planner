@@ -491,6 +491,12 @@ fn unmodeled_parts_are_reported_not_dropped() {
         let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
         if !snap.warnings.is_empty() {
             reported += 1;
+            // The model cannot say what the skill does, so its owner counts.
+            assert!(
+                counted(&snap, &op.id),
+                "{} warned but did not count",
+                partial.id
+            );
         }
     }
     assert!(
@@ -1062,4 +1068,674 @@ fn dorm_group_recovery_takes_only_the_strongest_across_families() {
     let best = a_all.max(b_all);
     approx(skills(&a), best, 1e-9);
     approx(skills(&b), best + b_self, 1e-9);
+}
+
+// ---- Who counts --------------------------------------------------------------
+
+/// Whether `op` counted in `snap`: see `MoodRate::counted`.
+fn counted(snap: &Snapshot, op: &OperatorId) -> bool {
+    snap.mood
+        .iter()
+        .find(|m| &m.operator == op)
+        .unwrap_or_else(|| panic!("{op} is not stationed"))
+        .counted
+}
+
+#[test]
+fn an_operator_whose_skills_do_nothing_there_is_filler() {
+    // An order efficiency holder counts in a Trading Post; an operator with
+    // no Trading Post skills adds only the +1% anyone would.
+    let (trader, _) = holder_of("trade_ord_spd");
+    let filler =
+        without_skills_for_excluding(RoomType::Trading, 1, std::slice::from_ref(&trader)).remove(0);
+    let b = base(vec![Room::new("t1", RoomType::Trading, 3)]);
+    let a = assign(&b, &[("t1", &[trader.clone(), filler.clone()])]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &trader));
+    assert!(!counted(&snap, &filler));
+
+    // Over a run, the report names the room they were filler in.
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    assert!(report(&trader).filler_in.is_empty());
+    assert_eq!(report(&filler).filler_in, vec![RoomId::new("t1")]);
+}
+
+#[test]
+fn operators_a_skill_picks_out_by_group_count() {
+    // "All Knight Operators assigned to Factories gain productivity": with
+    // its owner in the Control Center the Knights count, though their own
+    // skills do nothing in a Factory. A non-Knight beside them does not.
+    let (owner, _) = holder_of("control_prod_fraction");
+    let pool = without_skills_for_excluding(RoomType::Manufacture, 3, std::slice::from_ref(&owner));
+    let mut config = SimConfig::default();
+    config
+        .memberships
+        .tags
+        .insert("knight".into(), pool[..2].iter().cloned().collect());
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("cc", std::slice::from_ref(&owner)), ("f1", &pool)]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &config).unwrap();
+    assert!(counted(&snap, &owner));
+    assert!(counted(&snap, &pool[0]) && counted(&snap, &pool[1]));
+    assert!(!counted(&snap, &pool[2]));
+
+    // Without the owner, nothing picks them out.
+    let a = assign(&b, &[("f1", &pool)]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &config).unwrap();
+    assert!(pool.iter().all(|op| !counted(&snap, op)));
+}
+
+#[test]
+fn a_coworker_whose_bonus_automation_zeroes_is_filler() {
+    // Automation zeroes the productivity skills of the others in its
+    // Factory, so a Standardization holder beside it adds nothing that an
+    // operator without skills would not. The Automation holder counts (here
+    // through their own per-Power-Plant bonus).
+    let (auto, _) = holder_of("manu_prod_spd&power");
+    let std_skill = BuffId::new("manu_prod_spd[000]");
+    let std_op = data()
+        .operators
+        .values()
+        .find(|o| o.active_buffs(UnlockCond::BASE) == vec![&std_skill] && o.id != auto)
+        .unwrap()
+        .id
+        .clone();
+    let mut roster = maxed();
+    roster.insert(std_op.clone(), RosterEntry::at(UnlockCond::BASE));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[auto.clone(), std_op.clone()])]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &auto));
+    assert!(!counted(&snap, &std_op));
+
+    // On their own, Standardization counts.
+    let a = assign(&b, &[("f1", std::slice::from_ref(&std_op))]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &std_op));
+}
+
+#[test]
+fn a_morale_skill_counts_its_owner() {
+    // Restoring everyone's morale in a Dormitory counts; resting beside them
+    // does not.
+    let (healer, _) = holder_of("dorm_rec_all");
+    let resting =
+        without_skills_for_excluding(RoomType::Dormitory, 1, std::slice::from_ref(&healer))
+            .remove(0);
+    let b = base(vec![Room::new("d1", RoomType::Dormitory, 5)]);
+    let a = assign(&b, &[("d1", &[healer.clone(), resting.clone()])]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &healer));
+    assert!(!counted(&snap, &resting));
+
+    // Resting is not working: nobody in a Dormitory is filler.
+    let r = simulate(data(), &request(b, a)).unwrap();
+    for o in &r.operators {
+        assert!(o.worked_in.is_empty() && o.filler_in.is_empty(), "{o:?}");
+    }
+}
+
+#[test]
+fn a_trainee_is_never_filler() {
+    // A trainee is idle, so never works: whatever their skills, they are
+    // not filler. An assistant with no Training Room skills is.
+    let pool = without_skills_for(RoomType::Training, 2);
+    let b = base(vec![training_room(true)]);
+    let a = assign(&b, &[("tr", &pool)]);
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    assert_eq!(report(&pool[0]).filler_in, vec![RoomId::new("tr")]);
+    assert!(report(&pool[1]).filler_in.is_empty());
+}
+
+#[test]
+fn a_named_coworker_counts() {
+    // Alanna's "Here to Help!": Precious Metal productivity +15% when Warmy
+    // is in the same Factory. Before Elite 2 Warmy has no Factory skill of
+    // her own, yet she counts; anyone else in her place does not.
+    let alanna = by_name("Alanna");
+    let warmy = by_name("Warmy");
+    let mut roster = maxed();
+    roster.insert(warmy.clone(), RosterEntry::at(UnlockCond::BASE));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[alanna.clone(), warmy.clone()])]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &warmy));
+
+    let other =
+        without_skills_for_excluding(RoomType::Manufacture, 1, &[alanna.clone(), warmy.clone()])
+            .remove(0);
+    let a = assign(&b, &[("f1", &[alanna, other.clone()])]);
+    let snap = evaluate(data(), &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(!counted(&snap, &other));
+}
+
+#[test]
+fn a_resource_skill_counts_who_it_counts() {
+    // Chongyue gains Worldly Plight for each Sui operator in a work area.
+    // The resource is not simulated, but Nian (Sui, no Power Plant skills)
+    // still counts in a Power Plant; a non-Sui operator there does not.
+    let chongyue = by_name("Chongyue");
+    let nian = by_name("Nian");
+    let sui = |id: &OperatorId| {
+        data().operators[id.as_str()]
+            .powers()
+            .any(|p| p.as_str() == "sui")
+    };
+    assert!(sui(&chongyue) && sui(&nian));
+    let b = base(vec![Room::new("p1", RoomType::Power, 3)]);
+    let a = assign(
+        &b,
+        &[
+            ("cc", std::slice::from_ref(&chongyue)),
+            ("p1", std::slice::from_ref(&nian)),
+        ],
+    );
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &nian));
+
+    let other = without_skills_for_excluding(RoomType::Power, 40, &[chongyue.clone(), nian])
+        .into_iter()
+        .find(|o| !sui(o))
+        .unwrap();
+    let a = assign(
+        &b,
+        &[
+            ("cc", std::slice::from_ref(&chongyue)),
+            ("p1", std::slice::from_ref(&other)),
+        ],
+    );
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(!counted(&snap, &other));
+}
+
+#[test]
+fn nobody_working_in_the_reception_room_is_filler() {
+    // Its clue speed also rises with each occupant's rarity and promotion,
+    // which is not modelled, so the model cannot say anyone there does
+    // nothing, skills or not.
+    let op = without_skills_for(RoomType::Meeting, 1);
+    let b = base(vec![Room::new("r1", RoomType::Meeting, 3)]);
+    let a = assign(&b, &[("r1", &op)]);
+    let snap = evaluate(data(), &b, &a, &maxed(), &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &op[0]));
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let report = r.operators.iter().find(|o| o.id == op[0]).unwrap();
+    assert_eq!(report.worked_in, vec![RoomId::new("r1")]);
+    assert!(report.filler_in.is_empty());
+}
+
+#[test]
+fn a_scaler_counts_when_it_has_something_to_scale() {
+    // With Automation cut down to "others' productivity becomes 0" alone, its
+    // holder adds nothing of their own, yet counts for zeroing a coworker's
+    // Standardization.
+    let mut d = data().clone();
+    for s in d.skills.values_mut() {
+        if s.id.as_str().starts_with("manu_prod_spd&power") {
+            let clauses = &mut s.mechanics.as_mut().unwrap().clauses;
+            assert!(matches!(
+                clauses[0].effect,
+                Effect::ScaleOthersContribution { .. }
+            ));
+            clauses.truncate(1);
+        }
+    }
+    let (auto, _) = holder_of("manu_prod_spd&power");
+    let std_skill = BuffId::new("manu_prod_spd[000]");
+    let std_op = d
+        .operators
+        .values()
+        .find(|o| o.active_buffs(UnlockCond::BASE) == vec![&std_skill] && o.id != auto)
+        .unwrap()
+        .id
+        .clone();
+    let mut roster = maxed();
+    roster.insert(std_op.clone(), RosterEntry::at(UnlockCond::BASE));
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &[auto.clone(), std_op.clone()])]);
+    let snap = evaluate(&d, &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(counted(&snap, &auto));
+    assert!(!counted(&snap, &std_op));
+
+    // Alone, it has nothing to scale.
+    let a = assign(&b, &[("f1", std::slice::from_ref(&auto))]);
+    let snap = evaluate(&d, &b, &a, &roster, &SimConfig::default()).unwrap();
+    assert!(!counted(&snap, &auto));
+}
+
+#[test]
+fn a_report_stored_before_filler_tracking_still_reads() {
+    // Stored solves keep their simulation; one saved before `worked_in` and
+    // `filler_in` existed must still load, with neither known.
+    let op = without_skills_for(RoomType::Manufacture, 1);
+    let b = base(vec![gold_factory("f1", 3)]);
+    let a = assign(&b, &[("f1", &op)]);
+    let r = simulate(data(), &request(b, a)).unwrap();
+    let mut v = serde_json::to_value(&r).unwrap();
+    for o in v["operators"].as_array_mut().unwrap() {
+        let o = o.as_object_mut().unwrap();
+        o.remove("worked_in");
+        o.remove("filler_in");
+    }
+    let old: SimResult = serde_json::from_value(v).unwrap();
+    assert!(
+        old.operators
+            .iter()
+            .all(|o| o.worked_in.is_empty() && o.filler_in.is_empty())
+    );
+}
+
+// ---- Dormitory shifts --------------------------------------------------------
+
+/// Operators with no skills for a Factory or a Dormitory.
+fn plain_for_shifts(n: usize, exclude: &[OperatorId]) -> Vec<OperatorId> {
+    let dorm = without_skills_for_excluding(RoomType::Dormitory, 400, exclude);
+    without_skills_for_excluding(RoomType::Manufacture, 400, exclude)
+        .into_iter()
+        .filter(|o| dorm.contains(o))
+        .take(n)
+        .collect()
+}
+
+/// Workers in two Factories (three in the first) and five rested residents
+/// filling every bed, with nobody on the bench.
+fn full_dorm(residents: &[OperatorId], workers: &[OperatorId]) -> SimRequest {
+    let b = base(vec![
+        gold_factory("f1", 3),
+        gold_factory("f2", 3),
+        Room::new("d1", RoomType::Dormitory, 5).with_ambience(5000),
+    ]);
+    let (first, second) = workers.split_at(workers.len().min(3));
+    let a = assign(&b, &[("f1", first), ("f2", second), ("d1", residents)]);
+    let mut req = request(b, a);
+    req.config.horizon_hours = 72.0;
+    req.rotation = Rotation::MoodThreshold {
+        swap_out: 4.0,
+        swap_in: 20.0,
+        bench: Vec::new(),
+    };
+    req
+}
+
+#[test]
+fn residents_take_shifts_when_every_bed_is_taken() {
+    // The five workers tire (the two in f2 about an hour before the three in
+    // f1) and trade places with the five rested residents, who are the
+    // second shift; rested again, they trade back. Nobody is benched and
+    // nobody runs out of morale.
+    let pool = plain_for_shifts(10, &[]);
+    let (workers, residents) = pool.split_at(5);
+    let r = simulate(data(), &full_dorm(residents, workers)).unwrap();
+    assert!(
+        !r.events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::Exhausted { .. } | EventKind::Benched { .. }
+        )),
+        "{:?}",
+        r.events
+    );
+    for o in &r.operators {
+        assert!(o.min_mood > 0.0, "{o:?}");
+        assert!(o.hours_working > 0.0 && o.hours_resting > 0.0, "{o:?}");
+    }
+    for room in &r.rooms[1..3] {
+        assert!(room.average_stat_pct.unwrap() > 101.9, "{room:?}");
+    }
+    // A trade is two moves at one instant, each into the other's slot.
+    let moved: Vec<(f64, &Option<Slot>, &Slot)> = r
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Moved { from, to, .. } => Some((e.hour, from, to)),
+            _ => None,
+        })
+        .collect();
+    let ((h1, from1, to1), (h2, from2, to2)) = (moved[0], moved[1]);
+    approx(h1, h2, 1e-12);
+    assert!(
+        from1
+            .as_ref()
+            .is_some_and(|s| s.room.as_str().starts_with('f'))
+    );
+    assert_eq!(to1.room.as_str(), "d1");
+    assert_eq!(from2.as_ref(), Some(to1));
+    assert_eq!(Some(to2), from1.as_ref());
+}
+
+#[test]
+fn dormitory_support_stays_put() {
+    // Indigo restores morale to another resident, so she stays even while
+    // everyone is rested; Reed only speeds his own recovery, so he takes a
+    // shift like anyone else. Four workers tire, the one in f2 first and then
+    // the three in f1: one for each resident but Indigo.
+    let indigo = by_name("Indigo");
+    let reed = by_name("Reed");
+    let pool = plain_for_shifts(7, &[indigo.clone(), reed.clone()]);
+    let (workers, rest) = pool.split_at(4);
+    // Indigo last: were she eligible, ties would pick her first.
+    let residents = [
+        reed.clone(),
+        rest[0].clone(),
+        rest[1].clone(),
+        rest[2].clone(),
+        indigo.clone(),
+    ];
+    let req = full_dorm(&residents, workers);
+
+    let snap = evaluate(data(), &req.base, &req.assignment, &maxed(), &req.config).unwrap();
+    let rate = |id: &OperatorId| {
+        snap.mood
+            .iter()
+            .find(|m| &m.operator == id)
+            .unwrap()
+            .clone()
+    };
+    assert!(rate(&indigo).supports);
+    assert!(!rate(&reed).supports && rate(&reed).counted);
+
+    let r = simulate(data(), &req).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    approx(report(&indigo).hours_working, 0.0, 1e-12);
+    assert!(report(&reed).hours_working > 0.0);
+    assert!(
+        !r.events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Exhausted { .. }))
+    );
+}
+
+/// Morale state for driving a policy by hand.
+fn at_mood(mood: f64) -> OpState {
+    OpState {
+        mood,
+        max_mood: 24.0,
+        initial_mood: mood,
+        min_mood: mood,
+        hours_in_room: 0.0,
+        hours_working: 0.0,
+        hours_resting: 0.0,
+        hours_exhausted: 0.0,
+        hours_idle: 0.0,
+        hours_benched: 0.0,
+        worked_in: Default::default(),
+        counted_in: Default::default(),
+        supported_in: Default::default(),
+    }
+}
+
+#[test]
+fn a_tired_substitute_does_not_take_over_the_slot() {
+    // A substitute who tires before the worker they cover has rested goes to
+    // rest with no claim on the slot: once rested, they stay out of the
+    // worker's way.
+    let ops = plain_for_shifts(6, &[]);
+    let (worker, residents) = (&ops[0], &ops[1..]);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5),
+    ]);
+    let mut a = assign(
+        &b,
+        &[("f1", std::slice::from_ref(worker)), ("d1", residents)],
+    );
+    let work = Slot::new("f1", 0);
+    let mut moods: Vec<(OperatorId, f64)> = vec![(worker.clone(), 4.0)];
+    moods.extend(
+        residents
+            .iter()
+            .cloned()
+            .zip([24.0, 21.0, 21.0, 21.0, 21.0]),
+    );
+    let mut policy = MoodThreshold::new(4.0, 20.0, Vec::new());
+    let mut step = |a: &mut Assignment, moods: &[(OperatorId, f64)]| {
+        let states = moods
+            .iter()
+            .map(|(id, m)| (id.clone(), at_mood(*m)))
+            .collect();
+        let view = SimView {
+            hour: 0.0,
+            data: data(),
+            base: &b,
+            assignment: a,
+            states: &states,
+        };
+        let actions = policy.next_actions(&view);
+        for action in &actions {
+            if let SimAction::Swap { a: x, b: y } = action {
+                a.swap(x, y).unwrap();
+            }
+        }
+        actions
+    };
+    let who = |a: &Assignment, slot: &Slot| {
+        a.slots(slot.room.as_str()).unwrap()[usize::from(slot.index)].clone()
+    };
+
+    // The worker trades places with the best-rested resident.
+    step(&mut a, &moods);
+    let cover = who(&a, &work).unwrap();
+    assert_eq!(cover, residents[0]);
+    // The cover tires before the worker has rested: another resident steps in.
+    for (id, m) in &mut moods {
+        *m = if id == worker {
+            10.0
+        } else if *id == cover {
+            4.0
+        } else {
+            21.0
+        };
+    }
+    step(&mut a, &moods);
+    let second = who(&a, &work).unwrap();
+    assert!(second != cover && second != *worker);
+    // The worker, rested, goes home.
+    for (id, m) in &mut moods {
+        *m = if id == worker {
+            20.0
+        } else if *id == cover {
+            10.0
+        } else {
+            15.0
+        };
+    }
+    step(&mut a, &moods);
+    assert_eq!(who(&a, &work).as_ref(), Some(worker));
+    // The first cover, rested too, leaves the worker be.
+    for (id, m) in &mut moods {
+        *m = if id == worker {
+            18.0
+        } else if *id == cover {
+            24.0
+        } else {
+            15.0
+        };
+    }
+    assert!(step(&mut a, &moods).is_empty());
+    assert_eq!(who(&a, &work).as_ref(), Some(worker));
+}
+
+#[test]
+fn residents_cover_while_beds_are_free() {
+    // With beds to spare, a tired worker takes a free one and a rested
+    // resident takes the slot: the residents are the second shift whether or
+    // not the Dormitory is full.
+    let pool = plain_for_shifts(6, &[]);
+    let (workers, residents) = pool.split_at(3);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5).with_ambience(5000),
+    ]);
+    let a = assign(&b, &[("f1", workers), ("d1", residents)]);
+    let mut req = request(b, a);
+    req.config.horizon_hours = 72.0;
+    req.rotation = Rotation::MoodThreshold {
+        swap_out: 4.0,
+        swap_in: 20.0,
+        bench: Vec::new(),
+    };
+    let r = simulate(data(), &req).unwrap();
+    assert!(
+        !r.events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::Exhausted { .. } | EventKind::Benched { .. }
+        )),
+        "{:?}",
+        r.events
+    );
+    for o in &r.operators {
+        assert!(o.hours_working > 0.0 && o.hours_resting > 0.0, "{o:?}");
+    }
+    assert!(r.rooms[1].average_stat_pct.unwrap() > 102.9);
+}
+
+#[test]
+fn the_weaker_of_two_healers_takes_shifts() {
+    // Shining and Myrrh each restore morale to one other resident, but only
+    // the stronger effect of the type applies: Myrrh would never reach
+    // anyone, so she is the second shift. She sits first, where the stand-in
+    // newcomer must not make her look like support.
+    let (shining, myrrh) = (by_name("Shining"), by_name("Myrrh"));
+    let pool = plain_for_shifts(7, &[shining.clone(), myrrh.clone()]);
+    let (workers, rest) = pool.split_at(4);
+    let residents = [
+        myrrh.clone(),
+        shining.clone(),
+        rest[0].clone(),
+        rest[1].clone(),
+        rest[2].clone(),
+    ];
+    let req = full_dorm(&residents, workers);
+    let snap = evaluate(data(), &req.base, &req.assignment, &maxed(), &req.config).unwrap();
+    let rate = |id: &OperatorId| {
+        snap.mood
+            .iter()
+            .find(|m| &m.operator == id)
+            .unwrap()
+            .clone()
+    };
+    assert!(rate(&shining).supports && !rate(&myrrh).supports);
+
+    let r = simulate(data(), &req).unwrap();
+    let report = |id: &OperatorId| r.operators.iter().find(|o| &o.id == id).unwrap();
+    approx(report(&shining).hours_working, 0.0, 1e-12);
+    assert!(report(&myrrh).hours_working > 0.0);
+}
+
+#[test]
+fn a_resident_another_skill_needs_stays() {
+    // Sankta Miksaparato's clue bonus needs Fiammetta in a Dormitory, so
+    // Fiammetta stays put, though she raises nobody's morale.
+    let fiammetta = by_name("Fiammetta");
+    let mixer = by_name("Sankta Miksaparato");
+    let pool = plain_for_shifts(8, &[fiammetta.clone(), mixer.clone()]);
+    let (workers, rest) = pool.split_at(4);
+    let residents = [
+        rest[0].clone(),
+        rest[1].clone(),
+        rest[2].clone(),
+        rest[3].clone(),
+        fiammetta.clone(),
+    ];
+    let mut req = full_dorm(&residents, workers);
+    req.base.rooms.push(Room::new("r1", RoomType::Meeting, 3));
+    req.assignment = assign(
+        &req.base,
+        &[
+            ("f1", &workers[..3]),
+            ("f2", &workers[3..]),
+            ("d1", &residents),
+            ("r1", std::slice::from_ref(&mixer)),
+        ],
+    );
+    let snap = evaluate(data(), &req.base, &req.assignment, &maxed(), &req.config).unwrap();
+    let rate = snap.mood.iter().find(|m| m.operator == fiammetta).unwrap();
+    assert!(rate.supports);
+    let r = simulate(data(), &req).unwrap();
+    let report = r.operators.iter().find(|o| o.id == fiammetta).unwrap();
+    approx(report.hours_working, 0.0, 1e-12);
+}
+
+#[test]
+fn the_policy_passes_over_dormitory_support() {
+    // Even as the best-rested resident, support is not a substitute.
+    let ops = plain_for_shifts(3, &[]);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5),
+    ]);
+    let a = assign(&b, &[("f1", &ops[..1]), ("d1", &ops[1..])]);
+    let mut support = at_mood(24.0);
+    support.supported_in.insert(RoomId::new("d1"));
+    let states = [
+        (ops[0].clone(), at_mood(4.0)),
+        (ops[1].clone(), support),
+        (ops[2].clone(), at_mood(21.0)),
+    ]
+    .into_iter()
+    .collect();
+    let view = SimView {
+        hour: 0.0,
+        data: data(),
+        base: &b,
+        assignment: &a,
+        states: &states,
+    };
+    let actions = MoodThreshold::new(4.0, 20.0, Vec::new()).next_actions(&view);
+    let work = Slot::new("f1", 0);
+    let moved = |who: &OperatorId| {
+        actions.iter().any(
+            |act| matches!(act, SimAction::Move { operator, to } if operator == who && *to == work),
+        )
+    };
+    assert!(moved(&ops[2]), "{actions:?}");
+    assert!(!moved(&ops[1]), "{actions:?}");
+}
+
+#[test]
+fn a_swap_restarts_both_operators_time_in_room() {
+    // Ramping skills count hours since entering the room, so a trade starts
+    // the clock again for both.
+    struct SwapOnce {
+        done: bool,
+        after: Option<Vec<f64>>,
+    }
+    impl RotationPolicy for SwapOnce {
+        fn next_actions(&mut self, v: &SimView<'_>) -> Vec<SimAction> {
+            let (a, b) = (Slot::new("f1", 0), Slot::new("d1", 0));
+            if !self.done && v.hour >= 6.0 {
+                self.done = true;
+                return vec![SimAction::Swap { a, b }];
+            }
+            if self.done && self.after.is_none() {
+                let at = |s: &Slot| {
+                    v.assignment.slots(s.room.as_str()).unwrap()[usize::from(s.index)]
+                        .clone()
+                        .unwrap()
+                };
+                self.after = Some(
+                    [a, b]
+                        .iter()
+                        .map(|s| v.states[&at(s)].hours_in_room)
+                        .collect(),
+                );
+            }
+            Vec::new()
+        }
+    }
+    let pool = plain_for_shifts(2, &[]);
+    let b = base(vec![
+        gold_factory("f1", 3),
+        Room::new("d1", RoomType::Dormitory, 5),
+    ]);
+    let a = assign(&b, &[("f1", &pool[..1]), ("d1", &pool[1..])]);
+    let mut policy = SwapOnce {
+        done: false,
+        after: None,
+    };
+    simulate_with(data(), &b, &a, &maxed(), &SimConfig::default(), &mut policy).unwrap();
+    for hours in policy.after.unwrap() {
+        assert!(hours < 0.5, "{hours}");
+    }
 }

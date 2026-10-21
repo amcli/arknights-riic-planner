@@ -5,7 +5,7 @@
 //! mutators. Policies never see or touch simulator internals beyond the
 //! read-only [`SimView`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ak_domain::{Assignment, BaseConfig, GameData, OperatorId, RoomType, Slot};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,8 @@ pub enum SimAction {
     Move { operator: OperatorId, to: Slot },
     /// Take an operator off the base.
     Bench { operator: OperatorId },
+    /// Exchange the occupants of two slots.
+    Swap { a: Slot, b: Slot },
 }
 
 /// Decides shifts.
@@ -89,11 +91,17 @@ impl RotationPolicy for NoRotation {
 
 /// Two-shift rotation on morale thresholds.
 ///
-/// A working operator whose morale drops to `swap_out` moves to a vacant
-/// Dormitory slot (if none is free, they stay and exhaust). Their slot is
-/// filled by the best-rested `bench` operator at or above `swap_in`, if
-/// any. When the original occupant recovers to `swap_in` they return, and
-/// the substitute goes back to a Dormitory or the bench.
+/// A working operator whose morale drops to `swap_out` goes to rest, and
+/// the best-rested substitute at or above `swap_in` takes their slot.
+/// Substitutes are `bench` operators, off the base or resting in a
+/// Dormitory, and anyone else resting in a Dormitory except its support:
+/// those whose skills raise others' morale there, or whom another
+/// operator's skill needs there (see [`crate::MoodRate::supports`]). The
+/// rest of the residents are the second shift. The tired operator takes a
+/// vacant Dormitory slot, or, when every bed is taken, trades places with a
+/// substitute resting in one; with neither, they stay and exhaust. When the
+/// original occupant recovers to `swap_in` they trade places with whoever
+/// covers their slot.
 #[derive(Debug, Clone)]
 pub struct MoodThreshold {
     /// Move out at or below this morale.
@@ -102,7 +110,11 @@ pub struct MoodThreshold {
     pub swap_in: f64,
     /// Substitutes, not in the initial assignment.
     pub bench: Vec<OperatorId>,
+    /// Resting operators and the slot they return to.
     home: BTreeMap<OperatorId, Slot>,
+    /// Operators covering someone else's slot, who have no slot to return
+    /// to when they rest.
+    covering: BTreeSet<OperatorId>,
 }
 
 impl MoodThreshold {
@@ -113,7 +125,49 @@ impl MoodThreshold {
             swap_in,
             bench,
             home: BTreeMap::new(),
+            covering: BTreeSet::new(),
         }
+    }
+
+    /// The best-rested operator who can take over a slot, with the
+    /// Dormitory slot they rest in (`None` when off the base). With
+    /// `in_dorm`, only those resting in a Dormitory, who can trade places
+    /// with a tired worker when no bed is free. Ties go to those in a
+    /// Dormitory, since taking one of them frees a bed.
+    fn substitute(
+        &self,
+        v: &SimView<'_>,
+        plan: &Assignment,
+        in_dorm: bool,
+    ) -> Option<(OperatorId, Option<Slot>)> {
+        let dorm = |slot: &Slot| v.kind_of(slot) == Some(RoomType::Dormitory);
+        // Where everyone is, once: the bench can run to hundreds.
+        let at: BTreeMap<&OperatorId, Slot> = plan.iter().map(|(slot, op)| (op, slot)).collect();
+        let mut pool: Vec<(OperatorId, Option<Slot>)> = Vec::new();
+        for b in &self.bench {
+            match at.get(b) {
+                None if !in_dorm => pool.push((b.clone(), None)),
+                Some(slot) if dorm(slot) => pool.push((b.clone(), Some(slot.clone()))),
+                _ => {}
+            }
+        }
+        for (slot, op) in plan.iter() {
+            let supports = v
+                .states
+                .get(op)
+                .is_none_or(|st| st.supported_in.contains(&slot.room));
+            if dorm(&slot) && !supports && !self.bench.contains(op) && !self.home.contains_key(op) {
+                pool.push((op.clone(), Some(slot)));
+            }
+        }
+        let mood = |op: &OperatorId| v.mood(op.as_str()).unwrap_or(0.0);
+        pool.into_iter()
+            .filter(|(op, _)| mood(op) >= self.swap_in)
+            .max_by(|a, b| {
+                mood(&a.0)
+                    .total_cmp(&mood(&b.0))
+                    .then(a.1.is_some().cmp(&b.1.is_some()))
+            })
     }
 }
 
@@ -126,7 +180,8 @@ impl RotationPolicy for MoodThreshold {
         let mut plan = v.assignment.clone();
         let mut actions = Vec::new();
 
-        // 1. Rested primaries go home; substitutes step aside.
+        // 1. Rested operators go home, trading places with whoever covers
+        //    their slot.
         let homes: Vec<(OperatorId, Slot)> = self
             .home
             .iter()
@@ -138,7 +193,8 @@ impl RotationPolicy for MoodThreshold {
             if !rested {
                 continue;
             }
-            if plan.locate(op.as_str()).as_ref() == Some(&home) {
+            let at = plan.locate(op.as_str());
+            if at.as_ref() == Some(&home) {
                 self.home.remove(&op);
                 continue;
             }
@@ -147,34 +203,47 @@ impl RotationPolicy for MoodThreshold {
                 .and_then(|s| s.get(usize::from(home.index)))
                 .cloned()
                 .flatten();
-            if let Some(sub) = occupant {
-                match v.vacant_dorm(&plan) {
-                    Some(dorm) => {
-                        if plan.move_to(&sub, &dorm).is_ok() {
-                            actions.push(SimAction::Move {
-                                operator: sub,
-                                to: dorm,
-                            });
+            match (occupant, at) {
+                (Some(sub), Some(bed)) => {
+                    if plan.swap(&home, &bed).is_ok() {
+                        actions.push(SimAction::Swap { a: home, b: bed });
+                        self.covering.remove(&sub);
+                        self.home.remove(&op);
+                    }
+                }
+                (occupant, _) => {
+                    if let Some(sub) = occupant {
+                        self.covering.remove(&sub);
+                        match v.vacant_dorm(&plan) {
+                            Some(dorm) => {
+                                if plan.move_to(&sub, &dorm).is_ok() {
+                                    actions.push(SimAction::Move {
+                                        operator: sub,
+                                        to: dorm,
+                                    });
+                                }
+                            }
+                            None => {
+                                if let Some(at) = plan.locate(sub.as_str()) {
+                                    plan.remove(&at);
+                                }
+                                actions.push(SimAction::Bench { operator: sub });
+                            }
                         }
                     }
-                    None => {
-                        if let Some(at) = plan.locate(sub.as_str()) {
-                            plan.remove(&at);
-                        }
-                        actions.push(SimAction::Bench { operator: sub });
+                    if plan.move_to(&op, &home).is_ok() {
+                        actions.push(SimAction::Move {
+                            operator: op.clone(),
+                            to: home,
+                        });
+                        self.home.remove(&op);
                     }
                 }
             }
-            if plan.move_to(&op, &home).is_ok() {
-                actions.push(SimAction::Move {
-                    operator: op.clone(),
-                    to: home,
-                });
-                self.home.remove(&op);
-            }
         }
 
-        // 2. Tired workers rest; the bench fills in.
+        // 2. Tired workers rest and a substitute takes over: the worker takes
+        //    a vacant bed, or trades places with a substitute resting in one.
         let tired: Vec<(Slot, OperatorId)> = plan
             .iter()
             .filter(|(slot, op)| {
@@ -184,41 +253,44 @@ impl RotationPolicy for MoodThreshold {
             .map(|(slot, op)| (slot, op.clone()))
             .collect();
         for (slot, op) in tired {
-            let Some(dorm) = v.vacant_dorm(&plan) else {
-                break;
-            };
-            if plan.move_to(&op, &dorm).is_err() {
-                continue;
+            let bed = v.vacant_dorm(&plan);
+            let sub = self.substitute(v, &plan, bed.is_none());
+            match (bed, sub) {
+                (Some(bed), sub) => {
+                    if plan.move_to(&op, &bed).is_err() {
+                        continue;
+                    }
+                    actions.push(SimAction::Move {
+                        operator: op.clone(),
+                        to: bed,
+                    });
+                    if let Some((sub, _)) = sub
+                        && plan.move_to(&sub, &slot).is_ok()
+                    {
+                        actions.push(SimAction::Move {
+                            operator: sub.clone(),
+                            to: slot.clone(),
+                        });
+                        self.covering.insert(sub);
+                    }
+                }
+                (None, Some((sub, Some(sub_bed)))) => {
+                    if plan.swap(&slot, &sub_bed).is_err() {
+                        continue;
+                    }
+                    actions.push(SimAction::Swap {
+                        a: slot.clone(),
+                        b: sub_bed,
+                    });
+                    self.covering.insert(sub);
+                }
+                // Nowhere to rest, and nothing changed, so the same holds for
+                // every tired worker after this one.
+                _ => break,
             }
-            actions.push(SimAction::Move {
-                operator: op.clone(),
-                to: dorm,
-            });
-            if !self.bench.contains(&op) {
-                self.home.insert(op, slot.clone());
-            }
-            let sub = self
-                .bench
-                .iter()
-                .filter(|b| {
-                    let resting = plan
-                        .locate(b.as_str())
-                        .is_none_or(|s| v.kind_of(&s) == Some(RoomType::Dormitory));
-                    resting && v.mood(b.as_str()).is_some_and(|m| m >= self.swap_in)
-                })
-                .max_by(|a, b| {
-                    v.mood(a.as_str())
-                        .unwrap_or(0.0)
-                        .total_cmp(&v.mood(b.as_str()).unwrap_or(0.0))
-                })
-                .cloned();
-            if let Some(sub) = sub
-                && plan.move_to(&sub, &slot).is_ok()
-            {
-                actions.push(SimAction::Move {
-                    operator: sub,
-                    to: slot,
-                });
+            // A substitute who tires has no slot of their own to return to.
+            if !self.covering.remove(&op) && !self.bench.contains(&op) {
+                self.home.insert(op, slot);
             }
         }
         actions
