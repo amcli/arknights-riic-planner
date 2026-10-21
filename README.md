@@ -16,7 +16,7 @@ design; this README tracks what actually exists.
 | 6. Persistence | `ak-store` | **Done.** Versioned JSON documents for rosters, bases and solve jobs in Postgres, each owned by an account, migrated on read; pooled connections; schema migrations applied by `ak-api migrate`, so the server runs as a role that cannot change the schema. |
 | 7. API | `ak-api` | **Done.** Game data, `evaluate` and `simulate`, stored rosters and bases that requests can name by id, and solves as a bounded background queue with live progress, stop / cancel, and recovery after a restart. Accounts with password sign-in and cookie sessions; everything but the game data, `/healthz` and signing up, in and out needs one, and each sees only its own documents. JSON errors throughout, per-client rate limits, sign-in backoff, per-account quotas, body and work limits, gzip, opt-in CORS. |
 | 8. Roster import | `ak-data::import` | **Done.** Adapters for Krooster (public profile, current, row and legacy shapes; the API fetches a profile by username) and ak-planner exports, each tested against fixtures; unknown operators skipped and impossible promotions or levels clamped, with a report. |
-| 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library: roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines; sign-in and account creation. |
+| 9. Frontend | `frontend/` | **Done.** Vite + React + TS, no chart library, styled after the Arknights terminal with a PRTS overlay: a main menu, roster import with preview, a base editor on the in-game floor plan, a planning screen, live solve progress with stop, and results with finalists, a floor-plan diff, per-room output per day and morale sparklines; sign-in and account creation. |
 
 **Ingestion coverage (pinned en_US snapshot):** 410 / 410 operators with
 base skills, 715 / 715 skill tiers, 0 skipped under strict mode.
@@ -527,16 +527,25 @@ cargo run -p ak-cli -- import ak-planner plan.json --out roster.json  # write th
 ## How Layer 9 works
 
 The frontend (`frontend/`, Vite + React + TypeScript, no router or chart
-library) has one screen per step, switched by the URL hash. Rosters, Base,
-Plan and Results belong to an account: while nobody is signed in they show
-a sign-in card instead, which can also create an account. The header shows
-who is signed in, with a Sign out button, and a sign-in or sign-out in
-another tab is followed at once. If a session instead ends under an open
+library) has a main menu and one screen per step, switched by the URL
+hash. Home, Rosters, Base, Plan and Results belong to an account: while
+nobody is signed in they show a sign-in card instead, which can also create
+an account. The header bar (and the main menu) shows who is signed in, with
+a Sign out button, and a sign-in or sign-out in another tab is followed at
+once. If a session instead ends under an open
 screen (it expired), the next request brings back the sign-in card, and
 the screen stays behind it with anything unsaved until the same account
 signs in again; another account gets fresh screens. Remembered picks (the
 last roster and base) are forgotten when a different account signs in.
 
+- **Home** (`#/`): the main menu, laid out like the game's. Tiles lead to
+  every screen and show what is in each: the base and roster in use (its
+  rooms and layout, such as 2-4-3), the latest solve, the game data's
+  provenance. Notices name the data snapshot, the parser's coverage and the
+  latest solve, and the Doctor's badge counts the roster in use. In the
+  middle stands an assistant whose art each browser picks for itself and
+  keeps locally. The Krooster and ak-planner tiles open Rosters at
+  `#/rosters/krooster` or `#/rosters/ak-planner` with that source picked.
 - **Rosters** (`#/rosters`): fetch a Krooster roster by username (one the
   server kept from a minute or more ago says how old it is), or paste
   or open another tool's export (or the canonical JSON), preview what it
@@ -573,10 +582,17 @@ last roster and base) are forgotten when a different account signs in.
   simulate and solve panels for developers. The panels need a signed-in
   account, since requests run on one; the rest is public.
 
-The chart colours are the first three slots of a palette validated for
-colour-blind separation in light and dark mode; every coloured thing also
-carries a text label. The theme follows the system unless the switch in the
-header picks light or dark, which the browser remembers. Item names for
+The look follows the Arknights terminal: a foggy page (night in the dark
+theme) under dark slate panels with their corner cut, Barlow and Barlow
+Condensed type with JetBrains Mono for readouts (from Google Fonts), the
+terminal's orange for primary buttons and its blue for selection, and each
+panel numbered down the page. Every screen but home has a bar with Back and
+Home. A PRTS overlay (corner brackets, scanlines, a ruler and a status strip
+with the time) sits over the page without catching clicks; its button turns
+it off, and the browser remembers. The chart colours are the terminal's
+blue, orange and green, each over 5:1 on the slate panels; every coloured
+thing also carries a text label. The theme follows the system unless the
+switch picks light or dark, which the browser remembers. Item names for
 Factory formulas are a display table in `frontend/src/format.ts`, since the
 item table is not ingested.
 

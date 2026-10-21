@@ -42,6 +42,9 @@ const EFFORT = {
 } as const;
 type Effort = keyof typeof EFFORT;
 
+/** A time budget as the start button shows it: `20 s`, `5 min`. */
+const budgetText = (ms: number) => (ms >= 120_000 ? `${fmt(ms / 60_000)} min` : `${fmt(ms / 1000)} s`);
+
 const HORIZONS = [
   { hours: 24, label: "24 hours" },
   { hours: 72, label: "72 hours" },
@@ -191,6 +194,7 @@ export function PlanView() {
     <>
       <PageHeader
         title="Plan"
+        kicker="Operation prep"
         description="Choose a base and a roster, say what counts, and let the solver find assignments."
       />
       {missing && (
@@ -474,11 +478,22 @@ export function PlanView() {
               </label>
               <button
                 type="button"
-                className="lg full"
+                className="start"
                 disabled={busy || !base || !roster || (plan?.problems.length ?? 0) > 0}
                 onClick={() => void solve()}
               >
-                <IconPlay size={15} /> {busy ? "Starting…" : "Solve"}
+                <span className="start-main">
+                  <span className="start-label">
+                    <IconPlay size={22} /> {busy ? "Starting…" : "Start solve"}
+                  </span>
+                  <span className="start-sub">
+                    {HORIZONS.find((h) => h.hours === horizon)?.label ?? `${fmt(horizon)} hours`} · {EFFORT[effort].label}
+                  </span>
+                </span>
+                <span className="start-budget">
+                  <span>Budget</span>
+                  <strong>{budgetText(EFFORT[effort].solver.time_budget_ms)}</strong>
+                </span>
               </button>
               {error && <Callout tone="error">{error}</Callout>}
             </div>

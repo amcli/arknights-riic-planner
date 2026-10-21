@@ -7,12 +7,15 @@ import { IconAlert, IconInfo } from "./icons";
 
 export function PageHeader({
   title,
+  kicker,
   description,
   crumbs,
   meta,
   actions,
 }: {
   title: ReactNode;
+  /** A terminal-style line above the title, like `// OPERATION PREP`. */
+  kicker?: string;
   description?: ReactNode;
   /** A way back, above the title. */
   crumbs?: ReactNode;
@@ -24,6 +27,7 @@ export function PageHeader({
     <div className="page-head">
       <div className="page-head-main">
         {crumbs && <div className="crumbs">{crumbs}</div>}
+        {kicker && <p className="page-kicker">// {kicker}</p>}
         <h1 className="page-title">{title}</h1>
         {description && <p className="page-desc">{description}</p>}
         {meta}

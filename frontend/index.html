@@ -5,11 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f5fae'/%3E%3Cg fill='white'%3E%3Crect x='5' y='6' width='17' height='5' rx='2'/%3E%3Crect x='10' y='13.5' width='17' height='5' rx='2'/%3E%3Crect x='5' y='21' width='17' height='5' rx='2'/%3E%3C/g%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M0 0h24l8 8v24H0z' fill='%232b2c2e'/%3E%3Cg fill='white'%3E%3Crect x='5' y='7' width='16' height='4'/%3E%3Crect x='9' y='14' width='16' height='4'/%3E%3Crect x='5' y='21' width='16' height='4'/%3E%3C/g%3E%3Crect x='0' y='29' width='14' height='3' fill='%23ff6a1a'/%3E%3C/svg%3E"
+    />
+    <!-- The terminal's type: Barlow for text, Barlow Condensed for titles and
+         keys, JetBrains Mono for readouts. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:ital,wght@0,500;0,600;0,700;0,800;1,800&family=JetBrains+Mono:wght@400;500&display=swap"
     />
     <title>RIIC Planner</title>
     <script>
-      // The theme picked last in this browser (see the switch in App), applied
+      // The theme picked last in this browser (see components/chrome.tsx), applied
       // before first paint so a dark page never flashes light.
       try {
         var theme = localStorage.getItem("riic-planner:theme");

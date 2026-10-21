@@ -67,6 +67,7 @@ function SolveList() {
     <>
       <PageHeader
         title="Results"
+        kicker="Solve readouts"
         description="Every solve, with the best assignments it found and what they would produce."
         actions={
           <a className="button" href={href("plan")}>
@@ -175,7 +176,7 @@ function SolveDetail({ id }: { id: string }) {
   if (error) {
     return (
       <>
-        <PageHeader crumbs={crumbs} title="Solve" />
+        <PageHeader crumbs={crumbs} kicker="Solve readout" title="Solve" />
         <Callout tone="error">{error}</Callout>
       </>
     );
@@ -194,6 +195,7 @@ function SolveDetail({ id }: { id: string }) {
     <>
       <PageHeader
         crumbs={crumbs}
+        kicker="Solve readout"
         title={
           <>
             {job.name ?? "Solve"} <StatusBadge status={job.status} />

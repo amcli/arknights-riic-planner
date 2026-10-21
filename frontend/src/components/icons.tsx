@@ -25,19 +25,6 @@ function Svg({ size = 16, children, ...rest }: IconProps & { children: ReactNode
   );
 }
 
-/** Three staggered floors, like the base's own wings. */
-export function BrandMark() {
-  return (
-    <span className="brand-mark" aria-hidden="true">
-      <svg width={16} height={16} viewBox="0 0 16 16" fill="currentColor">
-        <rect x="1.5" y="2" width="10" height="3" rx="1.2" />
-        <rect x="4.5" y="6.5" width="10" height="3" rx="1.2" />
-        <rect x="1.5" y="11" width="10" height="3" rx="1.2" />
-      </svg>
-    </span>
-  );
-}
-
 export const IconRoster = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="9" cy="8" r="3.5" />
@@ -210,5 +197,34 @@ export const IconCopy = (p: IconProps) => (
 export const IconCode = (p: IconProps) => (
   <Svg {...p}>
     <path d="m8 7-5 5 5 5M16 7l5 5-5 5" />
+  </Svg>
+);
+
+export const IconHome = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 11 12 4l9 7v9h-6v-6H9v6H3z" />
+  </Svg>
+);
+
+export const IconLogOut = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M14 4h5v16h-5" />
+    <path d="m10 8-4 4 4 4M6 12h10" />
+  </Svg>
+);
+
+/** A targeting reticle: the PRTS overlay. */
+export const IconHud = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="7" />
+    <path d="M12 2v5M12 17v5M2 12h5M17 12h5" />
+  </Svg>
+);
+
+export const IconImage = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <circle cx="9" cy="10" r="2" />
+    <path d="m21 16-5-5L5 20" />
   </Svg>
 );

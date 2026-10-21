@@ -26,6 +26,7 @@ import { Callout, Empty, PageHeader, Segmented } from "../components/ui";
 import { useGameData } from "../data";
 import { ago, errorText, fmt, professionName, promotion, when } from "../format";
 import { EXAMPLE_ROSTER } from "../presets";
+import { useRoute } from "../router";
 import { recall, remember } from "../storage";
 
 const SOURCES: { id: RosterSource; label: string; help: string }[] = [
@@ -121,7 +122,13 @@ function ReportWarnings({ report, name, open }: { report: ImportReport; name: (i
 
 function ImportCard({ onSaved }: { onSaved: (id: string) => void }) {
   const { name } = useGameData();
-  const [source, setSource] = useState<RosterSource>("krooster");
+  // The main menu's import buttons open this screen at `#/rosters/<source>`.
+  const route = useRoute();
+  const linked = route.id === "krooster" || route.id === "ak-planner" ? route.id : null;
+  const [source, setSource] = useState<RosterSource>(linked ?? "krooster");
+  useEffect(() => {
+    if (linked) setSource(linked);
+  }, [linked]);
   const [username, setUsername] = useState(() => recall("krooster-user") ?? "");
   const [text, setText] = useState("");
   const [label, setLabel] = useState("");
@@ -470,6 +477,7 @@ export function RostersView() {
     <>
       <PageHeader
         title="Rosters"
+        kicker="Operator rosters"
         description="The operators you own. Their promotion decides which base skills are active."
       />
       <div className="with-sidebar">

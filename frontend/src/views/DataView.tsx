@@ -131,7 +131,11 @@ export function DataView() {
   const signedIn = useAuth().state.status === "signed-in";
   return (
     <>
-      <PageHeader title="Game data" description="Where the numbers come from, and every operator the planner knows." />
+      <PageHeader
+        title="Game data"
+        kicker="PRTS archives"
+        description="Where the numbers come from, and every operator the planner knows."
+      />
       <div className="stack">
         <div className="with-sidebar wide">
           <VersionCard v={data.version} />

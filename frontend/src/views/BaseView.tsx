@@ -401,7 +401,11 @@ export function BaseView() {
 
   return (
     <>
-      <PageHeader title="Base" description="Your rooms: levels, what each Factory makes, what each Trading Post sells." />
+      <PageHeader
+        title="Base"
+        kicker="RIIC layout"
+        description="Your rooms: levels, what each Factory makes, what each Trading Post sells."
+      />
       <div className="with-sidebar narrow">
         <section className="card">
           <header className="card-head">
